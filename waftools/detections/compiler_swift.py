@@ -20,7 +20,7 @@ def __add_swift_flags(ctx):
     ]
 
     verRe = re.compile("(?i)version\s?([\d.]+)")
-    ctx.env.SWIFT_VERSION = verRe.search(__run([ctx.env.SWIFT, '-version'])).group(1)
+    ctx.env.SWIFT_VERSION = verRe.search(__run([ctx.env.SWIFT, '-version']))[1]
 
     # prevent possible breakages with future swift versions
     if StrictVersion(ctx.env.SWIFT_VERSION) >= StrictVersion("6.0"):
@@ -34,14 +34,14 @@ def __add_swift_flags(ctx):
 
 
 def __add_static_swift_library_linking_flags(ctx, swift_library):
-    ctx.env.append_value('LINKFLAGS', [
-        '-L%s' % swift_library,
-        '-Xlinker', '-force_load_swift_libs', '-lc++',
-    ])
+    ctx.env.append_value(
+        'LINKFLAGS',
+        [f'-L{swift_library}', '-Xlinker', '-force_load_swift_libs', '-lc++'],
+    )
 
 
 def __add_dynamic_swift_library_linking_flags(ctx, swift_library):
-    ctx.env.append_value('LINKFLAGS', ['-L%s' % swift_library])
+    ctx.env.append_value('LINKFLAGS', [f'-L{swift_library}'])
 
     # ABI compatibility
     if StrictVersion(ctx.env.SWIFT_VERSION) >= StrictVersion("5.0"):
@@ -122,13 +122,10 @@ def __find_swift_library(ctx):
 
 def __find_macos_sdk(ctx):
     ctx.start_msg('Checking for macOS SDK')
-    sdk = None
     sdk_build_version = None
     sdk_version = None
 
-    # look for set macOS SDK paths and version in passed environment variables
-    if 'MACOS_SDK' in ctx.environ:
-        sdk = ctx.environ['MACOS_SDK']
+    sdk = ctx.environ['MACOS_SDK'] if 'MACOS_SDK' in ctx.environ else None
     if 'MACOS_SDK_VERSION' in ctx.environ:
         ctx.env.MACOS_SDK_VERSION = ctx.environ['MACOS_SDK_VERSION']
 
@@ -154,12 +151,12 @@ def __find_macos_sdk(ctx):
             if sdk_build_version and isinstance(sdk_build_version, str):
                 verRe = re.compile("(\d+)(\D+)(\d+)")
                 version_parts = verRe.search(sdk_build_version)
-                major = int(version_parts.group(1)) - 4
-                minor = string.ascii_lowercase.index(version_parts.group(2).lower())
-                build_version = '10.' + str(major) + '.' + str(minor)
+                major = int(version_parts[1]) - 4
+                minor = string.ascii_lowercase.index(version_parts[2].lower())
+                build_version = f'10.{str(major)}.{str(minor)}'
                 # from 20 onwards macOS 11.0 starts
-                if int(version_parts.group(1)) >= 20:
-                    build_version = '11.' + str(minor)
+                if int(version_parts[1]) >= 20:
+                    build_version = f'11.{str(minor)}'
 
             if not isinstance(sdk_version, str):
                 sdk_version = '10.10.0'
@@ -170,19 +167,14 @@ def __find_macos_sdk(ctx):
             else:
                 ctx.env.MACOS_SDK_VERSION = sdk_version
 
-        ctx.end_msg(sdk + ' (version found: ' + ctx.env.MACOS_SDK_VERSION + ')')
+        ctx.end_msg(f'{sdk} (version found: {ctx.env.MACOS_SDK_VERSION})')
     else:
         ctx.end_msg(False)
 
 
 def __find_swift_compiler(ctx):
     ctx.start_msg('Checking for swift (Swift compiler)')
-    swift = ''
-
-    # look for set swift paths in passed environment variables
-    if 'SWIFT' in ctx.environ:
-        swift = ctx.environ['SWIFT']
-
+    swift = ctx.environ['SWIFT'] if 'SWIFT' in ctx.environ else ''
     # find swift executable
     if not swift:
         swift = __run(['xcrun', '-find', 'swift'])

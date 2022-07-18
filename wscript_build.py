@@ -6,7 +6,7 @@ def _add_rst_manual_dependencies(ctx):
         options.rst ao.rst vo.rst af.rst vf.rst encode.rst
         input.rst osc.rst stats.rst lua.rst ipc.rst changes.rst""".split()
 
-    manpage_sources = ['DOCS/man/'+x for x in manpage_sources_basenames]
+    manpage_sources = [f'DOCS/man/{x}' for x in manpage_sources_basenames]
 
     for manpage_source in manpage_sources:
         ctx.add_manual_dependency(
@@ -25,11 +25,13 @@ def _build_html(ctx):
 
 def _build_man(ctx):
     ctx(
-        name         = 'rst2man',
-        target       = 'DOCS/man/mpv.1',
-        source       = 'DOCS/man/mpv.rst',
-        rule         = '${RST2MAN} --strip-elements-with-class=contents ${SRC} ${TGT}',
-        install_path = ctx.env.MANDIR + '/man1')
+        name='rst2man',
+        target='DOCS/man/mpv.1',
+        source='DOCS/man/mpv.rst',
+        rule='${RST2MAN} --strip-elements-with-class=contents ${SRC} ${TGT}',
+        install_path=f'{ctx.env.MANDIR}/man1',
+    )
+
 
     _add_rst_manual_dependencies(ctx)
 
@@ -60,11 +62,7 @@ def build(ctx):
     icons = [16, 32, 64, 128]
     for size in icons:
         name = "etc/mpv-icon-8bit-%dx%d.png" % (size, size)
-        ctx(
-            features = "file2string",
-            source = name,
-            target = "generated/%s.inc" % name,
-        )
+        ctx(features = "file2string", source = name, target=f"generated/{name}.inc")
 
     ctx(
         features = "file2string",
@@ -89,12 +87,8 @@ def build(ctx):
                  "auto_profiles.lua"]
 
     for fn in lua_files:
-        fn = "player/lua/" + fn
-        ctx(
-            features = "file2string",
-            source = fn,
-            target = "generated/%s.inc" % fn,
-        )
+        fn = f"player/lua/{fn}"
+        ctx(features = "file2string", source = fn, target=f"generated/{fn}.inc")
 
     ctx(
         features = "file2string",
@@ -161,7 +155,7 @@ def build(ctx):
             "-o", tgt,
         ])
         cmd.extend(src)
-        cmd.extend([ "-I.", "-I%s" % ctx.srcnode.abspath() ])
+        cmd.extend(["-I.", f"-I{ctx.srcnode.abspath()}"])
 
         return task.exec_command(cmd)
 
@@ -665,15 +659,10 @@ def build(ctx):
         vre = '#define MPV_CLIENT_API_VERSION MPV_MAKE_VERSION\((.*), (.*)\)'
         libmpv_header = ctx.path.find_node("libmpv/client.h").read()
         major, minor = re.search(vre, libmpv_header).groups()
-        libversion = major + '.' + minor + '.0'
+        libversion = f'{major}.{minor}.0'
 
         def _build_libmpv(shared):
-            features = "c "
-            if shared:
-                features += "cshlib syms"
-            else:
-                features += "cstlib"
-
+            features = "c " + ("cshlib syms" if shared else "cstlib")
             libmpv_kwargs = {
                 "target": "mpv",
                 "source":   ctx.filtered_sources(sources),
@@ -716,7 +705,7 @@ def build(ctx):
                         if l in res:
                             res.remove(l)
                         res.append(l)
-            return " ".join(["-l" + l for l in res])
+            return " ".join([f"-l{l}" for l in res])
 
         ctx(
             target       = 'libmpv/mpv.pc',
@@ -732,9 +721,9 @@ def build(ctx):
         headers = ["client.h", "render.h",
                    "render_gl.h", "stream_cb.h"]
         for f in headers:
-            ctx.install_as(ctx.env.INCLUDEDIR + '/mpv/' + f, 'libmpv/' + f)
+            ctx.install_as(f'{ctx.env.INCLUDEDIR}/mpv/{f}', f'libmpv/{f}')
 
-        ctx.install_as(ctx.env.LIBDIR + '/pkgconfig/mpv.pc', 'libmpv/mpv.pc')
+        ctx.install_as(f'{ctx.env.LIBDIR}/pkgconfig/mpv.pc', 'libmpv/mpv.pc')
 
     if ctx.dependency_satisfied('html-build'):
         _build_html(ctx)
@@ -748,26 +737,29 @@ def build(ctx):
     if ctx.dependency_satisfied('cplayer'):
 
         if ctx.env.ZSHDIR:
-            ctx.install_as(ctx.env.ZSHDIR + '/_mpv', 'etc/_mpv.zsh')
+            ctx.install_as(f'{ctx.env.ZSHDIR}/_mpv', 'etc/_mpv.zsh')
 
         if ctx.env.BASHDIR:
-            ctx.install_as(ctx.env.BASHDIR + '/mpv', 'etc/mpv.bash-completion')
+            ctx.install_as(f'{ctx.env.BASHDIR}/mpv', 'etc/mpv.bash-completion')
 
-        ctx.install_files(
-            ctx.env.DATADIR + '/applications',
-            ['etc/mpv.desktop'] )
+        ctx.install_files(f'{ctx.env.DATADIR}/applications', ['etc/mpv.desktop'])
 
         ctx.install_files(ctx.env.CONFDIR, ['etc/encoding-profiles.conf'] )
 
         for size in '16x16 32x32 64x64 128x128'.split():
             ctx.install_as(
-                ctx.env.DATADIR + '/icons/hicolor/' + size + '/apps/mpv.png',
-                'etc/mpv-icon-8bit-' + size + '.png')
+                f'{ctx.env.DATADIR}/icons/hicolor/{size}/apps/mpv.png',
+                f'etc/mpv-icon-8bit-{size}.png',
+            )
+
 
         ctx.install_as(
-                ctx.env.DATADIR + '/icons/hicolor/scalable/apps/mpv.svg',
-                'etc/mpv-gradient.svg')
+            f'{ctx.env.DATADIR}/icons/hicolor/scalable/apps/mpv.svg',
+            'etc/mpv-gradient.svg',
+        )
+
 
         ctx.install_files(
-            ctx.env.DATADIR + '/icons/hicolor/symbolic/apps',
-            ['etc/mpv-symbolic.svg'])
+            f'{ctx.env.DATADIR}/icons/hicolor/symbolic/apps',
+            ['etc/mpv-symbolic.svg'],
+        )

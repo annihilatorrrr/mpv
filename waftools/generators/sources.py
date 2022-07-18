@@ -7,8 +7,7 @@ import os
 
 def __wayland_scanner_cmd__(ctx, mode, dir, src, vendored_file):
     return "${{WAYSCAN}} {0} < {1} > ${{TGT}}".format(
-        mode,
-        "${SRC}" if vendored_file else "{}/{}".format(dir, src)
+        mode, "${SRC}" if vendored_file else f"{dir}/{src}"
     )
 
 def __file2string__(ctx, **kwargs):
@@ -51,7 +50,7 @@ def __wayland_protocol_code__(ctx, **kwargs):
 
     if protocol_is_vendored:
         del kwargs['vendored_protocol']
-        kwargs['source'] = '{}/{}'.format(kwargs['proto_dir'], file_name)
+        kwargs['source'] = f"{kwargs['proto_dir']}/{file_name}"
 
     ctx(
         rule   = __wayland_scanner_cmd__(ctx, 'private-code', kwargs['proto_dir'],
@@ -67,7 +66,7 @@ def __wayland_protocol_header__(ctx, **kwargs):
 
     if protocol_is_vendored:
         del kwargs['vendored_protocol']
-        kwargs['source'] = '{}/{}'.format(kwargs['proto_dir'], file_name)
+        kwargs['source'] = f"{kwargs['proto_dir']}/{file_name}"
 
     ctx(
         rule   = __wayland_scanner_cmd__(ctx, 'client-header', kwargs['proto_dir'],

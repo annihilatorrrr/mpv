@@ -13,7 +13,7 @@ def __get_cc_env_vars__(cc):
 
 def __test_and_add_flags__(ctx, flags):
     for flag in flags:
-        if ctx.check_cc(cflags='-Werror ' + flag, mandatory=False):
+        if ctx.check_cc(cflags=f'-Werror {flag}', mandatory=False):
             ctx.env.CFLAGS += [flag]
 
 def __add_generic_flags__(ctx):

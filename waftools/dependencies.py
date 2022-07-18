@@ -107,8 +107,7 @@ the autodetection check failed.".format(self.identifier)
         self.ctx.end_msg(self.__message__(reason), color)
 
     def __message__(self, message):
-        optional_message = self.ctx.deps_msg.get(self.identifier)
-        if optional_message:
+        if optional_message := self.ctx.deps_msg.get(self.identifier):
             return "{0} ({1})".format(message, optional_message)
         else:
             return message
@@ -178,10 +177,7 @@ def unpack_dependencies_lists(ctx):
 
 def filtered_sources(ctx, sources):
     def __source_file__(source):
-        if isinstance(source, tuple):
-            return source[0]
-        else:
-            return source
+        return source[0] if isinstance(source, tuple) else source
 
     def __check_filter__(dependency):
         return dependency_satisfied(ctx, dependency)

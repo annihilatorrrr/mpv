@@ -26,10 +26,10 @@ def __merge_options__(dependency_identifier, *args):
     return options_accu
 
 def _filter_cc_arguments(ctx, opts):
-    if ctx.env.DEST_OS != Utils.unversioned_sys_platform():
-        # cross compiling, remove execute=True if present
-        if opts.get('execute'):
-            opts['execute'] = False
+    if ctx.env.DEST_OS != Utils.unversioned_sys_platform() and opts.get(
+        'execute'
+    ):
+        opts['execute'] = False
     return opts
 
 def check_program(name, var):
@@ -95,7 +95,7 @@ def check_pkg_config_mixed(_dyn_libs, *args, **kw_ext):
     return _check_pkg_config([_dyn_libs], ["--libs", "--cflags"], *args, **kw_ext)
 
 def check_pkg_config_mixed_all(*all_args, **kw_ext):
-    args = [all_args[i] for i in [n for n in range(0, len(all_args)) if n % 3]]
+    args = [all_args[i] for i in [n for n in range(len(all_args)) if n % 3]]
     return _check_pkg_config(all_args[::3], ["--libs", "--cflags"], *args, **kw_ext)
 
 def check_pkg_config_cflags(*args, **kw_ext):
@@ -112,9 +112,9 @@ def _check_pkg_config(_dyn_libs, _pkgc_args, *args, **kw_ext):
         sargs     = []
         pkgc_args = _pkgc_args
         dyn_libs  = {}
-        for i in range(0, len(packages)):
+        for i in range(len(packages)):
             if i < len(verchecks):
-                sargs.append(packages[i] + ' ' + verchecks[i])
+                sargs.append(f'{packages[i]} {verchecks[i]}')
             else:
                 sargs.append(packages[i])
             if _dyn_libs and _dyn_libs[i]:
@@ -141,13 +141,14 @@ def _check_pkg_config(_dyn_libs, _pkgc_args, *args, **kw_ext):
         defkey = inflector.define_key(dependency_identifier)
         if result:
             ctx.define(defkey, 1)
-            for x in dyn_libs.keys():
-                ctx.env['LIB_'+x] += dyn_libs[x]
+            for x in dyn_libs:
+                ctx.env[f'LIB_{x}'] += dyn_libs[x]
         else:
             ctx.add_optional_message(dependency_identifier,
                                      "'{0}' not found".format(" ".join(sargs)))
             ctx.undefine(defkey)
         return result
+
     return fn
 
 def check_headers(*headers, **kw_ext):
@@ -194,7 +195,8 @@ def check_stub(ctx, dependency_identifier):
 
 def compose_checks(*checks):
     def fn(ctx, dependency_identifier):
-        return all([check(ctx, dependency_identifier) for check in checks])
+        return all(check(ctx, dependency_identifier) for check in checks)
+
     return fn
 
 def any_check(*checks):
@@ -205,17 +207,17 @@ def any_check(*checks):
 def load_fragment(fragment):
     file_path = os.path.join(os.path.dirname(__file__), '..', 'fragments',
                              fragment)
-    fp = open(file_path,"r")
-    fragment_code = fp.read()
-    fp.close()
+    with open(file_path,"r") as fp:
+        fragment_code = fp.read()
     return fragment_code
 
 def check_macos_sdk(version):
     def fn(ctx, dependency_identifier):
-        if ctx.env.MACOS_SDK_VERSION:
-            if StrictVersion(ctx.env.MACOS_SDK_VERSION) >= StrictVersion(version):
-                ctx.define(inflector.define_key(dependency_identifier), 1)
-                return True
+        if ctx.env.MACOS_SDK_VERSION and StrictVersion(
+            ctx.env.MACOS_SDK_VERSION
+        ) >= StrictVersion(version):
+            ctx.define(inflector.define_key(dependency_identifier), 1)
+            return True
         return False
 
     return fn

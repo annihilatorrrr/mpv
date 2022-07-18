@@ -9,7 +9,7 @@ def sh(command):
     return os.popen(command).read().strip()
 
 def bundle_path(binary_name):
-    return "%s.app" % binary_name
+    return f"{binary_name}.app"
 
 def bundle_name(binary_name):
     return os.path.basename(bundle_path(binary_name))
@@ -44,9 +44,8 @@ def create_bundle_symlink(binary_name, symlink_name):
 
 def bundle_version():
     if os.path.exists('VERSION'):
-        x = open('VERSION')
-        version = x.read()
-        x.close()
+        with open('VERSION') as x:
+            version = x.read()
     else:
         version = sh("./version.sh").strip()
     return version
@@ -67,7 +66,7 @@ def main():
     else:
         binary_name = args[0]
 
-    print("Creating Mac OS X application bundle (version: %s)..." % version)
+    print(f"Creating Mac OS X application bundle (version: {version})...")
     print("> copying bundle skeleton")
     copy_bundle(binary_name)
     print("> copying binary")

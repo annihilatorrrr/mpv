@@ -255,21 +255,21 @@ class MatroskaElement(object):
         self.name = name
         self.definename = '{0}_ID_{1}'.format(namespace, name.upper())
         self.fieldname = camelcase_to_words(name)
-        self.structname = 'ebml_' + self.fieldname
+        self.structname = f'ebml_{self.fieldname}'
         self.elid = elid
         self.valtype = valtype
         if valtype == 'sub':
             self.ebmltype = 'EBML_TYPE_SUBELEMENTS'
-            self.valname = 'struct ' + self.structname
+            self.valname = f'struct {self.structname}'
         else:
-            self.ebmltype = 'EBML_TYPE_' + valtype.upper()
+            self.ebmltype = f'EBML_TYPE_{valtype.upper()}'
             try:
                 self.valname = {'uint': 'uint64_t', 'str': 'char *',
                                 'binary': 'bstr', 'ebml_id': 'uint32_t',
                                 'float': 'double', 'sint': 'int64_t',
                                 }[valtype]
             except KeyError:
-                raise SyntaxError('Unrecognized value type ' + valtype)
+                raise SyntaxError(f'Unrecognized value type {valtype}')
         self.subelements = ()
 
     def add_subelements(self, subelements):
@@ -417,7 +417,16 @@ def parse_one(s, depth, parent, maxlen):
     this_length = len(elid) / 2 + size + length
     if elem is not None:
         if elem.valtype != 'skip':
-            print("    " * depth, '[' + elid + ']', elem.name, 'size:', length, 'value:', end=' ')
+            print(
+                "    " * depth,
+                f'[{elid}]',
+                elem.name,
+                'size:',
+                length,
+                'value:',
+                end=' ',
+            )
+
         if elem.valtype == 'sub':
             print('subelements:')
             while length > 0:
@@ -431,14 +440,8 @@ def parse_one(s, depth, parent, maxlen):
             dec = ''
             if elem.valtype == 'ebml_id':
                 idelem = elementd.get(hexlify(t).decode('ascii'))
-                if idelem is None:
-                    dec = '(UNKNOWN)'
-                else:
-                    dec = '({0.name})'.format(idelem)
-            if len(t) < 20:
-                t = hexlify(t).decode('ascii')
-            else:
-                t = '<{0} bytes>'.format(len(t))
+                dec = '(UNKNOWN)' if idelem is None else '({0.name})'.format(idelem)
+            t = hexlify(t).decode('ascii') if len(t) < 20 else '<{0} bytes>'.format(len(t))
             print('binary', t, dec)
         elif elem.valtype == 'uint':
             print('uint', read_uint(s, length))
@@ -451,7 +454,7 @@ def parse_one(s, depth, parent, maxlen):
         else:
             raise NotImplementedError
     else:
-        print("    " * depth, '[' + elid + '] Unknown element! size:', length)
+        print("    " * depth, f'[{elid}] Unknown element! size:', length)
         read(s, length)
     return this_length
 

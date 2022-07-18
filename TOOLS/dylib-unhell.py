@@ -12,16 +12,18 @@ usr_re = re.compile("^/usr/lib/")
 exe_re = re.compile("@executable_path")
 
 def is_user_lib(objfile, libname):
-    return not sys_re.match(libname) and \
-           not usr_re.match(libname) and \
-           not exe_re.match(libname) and \
-           not "libobjc." in libname and \
-           not "libSystem." in libname and \
-           not "libc." in libname and \
-           not "libgcc." in libname and \
-           not os.path.basename(libname) == 'Python' and \
-           not os.path.basename(objfile) in libname and \
-           not "libswift" in libname
+    return (
+        not sys_re.match(libname)
+        and not usr_re.match(libname)
+        and not exe_re.match(libname)
+        and "libobjc." not in libname
+        and "libSystem." not in libname
+        and "libc." not in libname
+        and "libgcc." not in libname
+        and os.path.basename(libname) != 'Python'
+        and os.path.basename(objfile) not in libname
+        and "libswift" not in libname
+    )
 
 def otool(objfile):
     command = "otool -L '%s' | grep -e '\t' | awk '{ print $1 }'" % objfile
@@ -32,12 +34,7 @@ def get_rpaths_dev_tools(binary):
     command = "otool -l '%s' | grep -A2 LC_RPATH | grep path | grep \"Xcode\|CommandLineTools\"" % binary
     result  = subprocess.check_output(command, shell = True, universal_newlines=True)
     pathRe = re.compile("^\s*path (.*) \(offset \d*\)$")
-    output = []
-
-    for line in result.splitlines():
-        output.append(pathRe.search(line).group(1).strip())
-
-    return output
+    return [pathRe.search(line)[1].strip() for line in result.splitlines()]
 
 def install_name_tool_change(old, new, objfile):
     subprocess.call(["install_name_tool", "-change", old, new, objfile])

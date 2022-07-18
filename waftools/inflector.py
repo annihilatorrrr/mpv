@@ -13,7 +13,7 @@ def storage_key(dep):
     return sanitize_id(dep)
 
 def define_key(dep):
-    return ("have_" + storage_key(dep)).upper()
+    return f"have_{storage_key(dep)}".upper()
 
 def define_dict(dep):
     return {'define_name': define_key(dep)}

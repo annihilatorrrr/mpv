@@ -9,13 +9,11 @@ def get_config_header(self, defines=True, headers=False, define_prefix=''):
     from waflib.Tools.c_config import DEFKEYS, INCKEYS
     lst = []
     if headers:
-        for x in self.env[INCKEYS]:
-            lst.append('#include <%s>' % x)
-
+        lst.extend(f'#include <{x}>' for x in self.env[INCKEYS])
     if defines:
         for x in self.env[DEFKEYS]:
             val = self.is_defined(x) and self.get_define(x) or "0"
-            lst.append('#define %s %s' % (define_prefix + x, val))
+            lst.append(f'#define {define_prefix + x} {val}')
 
     return "\n".join(lst)
 
@@ -49,12 +47,11 @@ def build(ctx):
         run_str = try_last_linkflags(cls)
 
     cls = Task.classes['macplist']
+
+
     class macplist(cls):
         def run(self):
             from waflib import Utils
-            if getattr(self, 'code', None):
-                txt = self.code
-            else:
-                txt = self.inputs[0].read()
+            txt = self.code if getattr(self, 'code', None) else self.inputs[0].read()
             txt = Utils.subst_vars(txt, self.env)
             self.outputs[0].write(txt)

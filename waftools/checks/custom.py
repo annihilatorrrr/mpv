@@ -16,10 +16,7 @@ def check_pthread_flag(ctx, dependency_identifier):
         check_cc(fragment = pthreads_program, cflags = '-pthread',
                                             linkflags = '-pthread') ]
 
-    for fn in checks:
-        if fn(ctx, dependency_identifier):
-            return True
-    return False
+    return any(fn(ctx, dependency_identifier) for fn in checks)
 
 def check_pthreads(ctx, dependency_identifier):
     if ctx.dependency_satisfied('win32-internal-pthreads'):
@@ -39,21 +36,21 @@ def check_pthreads(ctx, dependency_identifier):
     libs    = ['pthreadGC2', 'pthread']
     checkfn = check_cc(fragment=pthreads_program, cflags=platform_cflags)
     checkfn_nocflags = check_cc(fragment=pthreads_program)
-    for fn in [checkfn, checkfn_nocflags]:
-        if check_libs(libs, fn)(ctx, dependency_identifier):
-            return True
-    return False
+    return any(
+        check_libs(libs, fn)(ctx, dependency_identifier)
+        for fn in [checkfn, checkfn_nocflags]
+    )
 
 def check_iconv(ctx, dependency_identifier):
     iconv_program = load_fragment('iconv.c')
     libdliconv = " ".join(ctx.env.LIB_LIBDL + ['iconv'])
     libs       = ['iconv', libdliconv]
     args       = {'fragment': iconv_program}
-    if ctx.env.DEST_OS == 'openbsd' or ctx.env.DEST_OS == 'freebsd':
+    if ctx.env.DEST_OS in ['openbsd', 'freebsd']:
         args['cflags'] = '-I/usr/local/include'
         args['linkflags'] = '-L/usr/local/lib'
     elif ctx.env.DEST_OS == 'win32':
-        args['linkflags'] = " ".join(['-L' + x for x in ctx.env.LIBRARY_PATH])
+        args['linkflags'] = " ".join([f'-L{x}' for x in ctx.env.LIBRARY_PATH])
     checkfn = check_cc(**args)
     return check_libs(libs, checkfn)(ctx, dependency_identifier)
 
@@ -95,8 +92,10 @@ def check_lua(ctx, dependency_identifier):
             # XXX: this is a bit of a hack, ask waf developers if I can copy
             # the uselib_store to 'lua'
             ctx.mark_satisfied(lua_version)
-            ctx.add_optional_message(dependency_identifier,
-                                     'version found: ' + display_version)
+            ctx.add_optional_message(
+                dependency_identifier, f'version found: {display_version}'
+            )
+
             return True
     return False
 
@@ -132,15 +131,21 @@ def check_cocoa(ctx, dependency_identifier):
 def check_swift(version):
     def fn(ctx, dependency_identifier):
         minVer = StrictVersion(version)
-        if ctx.env.SWIFT_VERSION:
-            if StrictVersion(ctx.env.SWIFT_VERSION) >= minVer:
-                ctx.add_optional_message(dependency_identifier,
-                                         'version found: ' + str(ctx.env.SWIFT_VERSION))
-                return True
+        if (
+            ctx.env.SWIFT_VERSION
+            and StrictVersion(ctx.env.SWIFT_VERSION) >= minVer
+        ):
+            ctx.add_optional_message(
+                dependency_identifier,
+                f'version found: {str(ctx.env.SWIFT_VERSION)}',
+            )
+
+            return True
         ctx.add_optional_message(dependency_identifier,
                                  "'swift >= " + str(minVer) + "' not found, found " +
                                  str(ctx.env.SWIFT_VERSION or None))
         return False
+
     return fn
 
 def check_egl_provider(minVersion=None, name='egl', check=None):

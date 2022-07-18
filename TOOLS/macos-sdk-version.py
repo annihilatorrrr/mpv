@@ -45,23 +45,22 @@ def find_macos_sdk():
     if sdk_build_version and isinstance(sdk_build_version, str):
         verRe = re.compile("(\d+)(\D+)(\d+)")
         version_parts = verRe.search(sdk_build_version)
-        major = int(version_parts.group(1)) - 4
-        minor = string.ascii_lowercase.index(version_parts.group(2).lower())
-        build_version = '10.' + str(major) + '.' + str(minor)
+        major = int(version_parts[1]) - 4
+        minor = string.ascii_lowercase.index(version_parts[2].lower())
+        build_version = f'10.{str(major)}.{str(minor)}'
         # from 20 onwards macOS 11.0 starts
-        if int(version_parts.group(1)) >= 20:
-            build_version = '11.' + str(minor)
+        if int(version_parts[1]) >= 20:
+            build_version = f'11.{str(minor)}'
 
     if not isinstance(sdk_version, str):
         sdk_version = '10.10.0'
 
     # pick the higher version, always pick sdk over build if newer
-    if StrictVersion(build_version) > StrictVersion(sdk_version):
-        return sdk,build_version
-    else:
-        return sdk,sdk_version
-
-    return sdk,sdk_version
+    return (
+        (sdk, build_version)
+        if StrictVersion(build_version) > StrictVersion(sdk_version)
+        else (sdk, sdk_version)
+    )
 
 if __name__ == "__main__":
     sdk_info = find_macos_sdk()
