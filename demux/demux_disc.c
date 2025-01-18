@@ -94,7 +94,7 @@ static void add_dvd_streams(demuxer_t *demuxer)
 
             // emulate the extradata
             struct mp_csp_params csp = MP_CSP_PARAMS_DEFAULTS;
-            struct mp_cmat cmatrix;
+            struct pl_transform3x3 cmatrix;
             mp_get_csp_matrix(&csp, &cmatrix);
 
             char *s = talloc_strdup(sh, "");
@@ -273,6 +273,33 @@ static bool d_read_packet(struct demuxer *demuxer, struct demux_packet **out_pkt
     return 1;
 }
 
+static void add_stream_editions(struct demuxer *demuxer)
+{
+    unsigned titles = 0;
+    if (stream_control(demuxer->stream, STREAM_CTRL_GET_NUM_TITLES, &titles) != STREAM_OK)
+        return;
+    for (unsigned title = 0; title < titles; ++title) {
+        double duration = title;
+        if (stream_control(demuxer->stream, STREAM_CTRL_GET_TITLE_LENGTH, &duration) != STREAM_OK)
+            continue;
+
+        struct demux_edition new = {
+            .demuxer_id = title,
+            .default_edition = false,
+            .metadata = talloc_zero(demuxer, struct mp_tags),
+        };
+        MP_TARRAY_APPEND(demuxer, demuxer->editions, demuxer->num_editions, new);
+
+        char *time = mp_format_time(duration, true);
+        double playlist = title;
+        if (stream_control(demuxer->stream, STREAM_CTRL_GET_TITLE_PLAYLIST, &playlist) == STREAM_OK)
+            time = talloc_asprintf_append(time, ") (%05.0f.mpls", playlist);
+        mp_tags_set_str(new.metadata, "TITLE",
+                        mp_tprintf(42, "title: %u (%s)", title + 1, time));
+        talloc_free(time);
+    }
+}
+
 static void add_stream_chapters(struct demuxer *demuxer)
 {
     int num = 0;
@@ -335,10 +362,15 @@ static int d_open(demuxer_t *demuxer, enum demux_check check)
     add_dvd_streams(demuxer);
     add_streams(demuxer);
     add_stream_chapters(demuxer);
+    add_stream_editions(demuxer);
 
     double len;
     if (stream_control(demuxer->stream, STREAM_CTRL_GET_TIME_LENGTH, &len) >= 1)
         demuxer->duration = len;
+
+    unsigned title;
+    if (stream_control(demuxer->stream, STREAM_CTRL_GET_CURRENT_TITLE, &title) >= 1)
+        demuxer->edition = title;
 
     return 0;
 }

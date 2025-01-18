@@ -23,7 +23,9 @@
 
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
-#include <unistd.h>
+#include <libplacebo/vulkan.h>
+
+#include "osdep/io.h"
 
 #if HAVE_WIN32_DESKTOP
 #include <versionhelpers.h>
@@ -39,10 +41,9 @@ struct ext_vk {
     CUmipmappedArray mma;
 
     pl_tex pltex;
-    pl_sync sync;
-
-    CUexternalSemaphore ss;
-    CUexternalSemaphore ws;
+    pl_vulkan_sem vk_sem;
+    union pl_handle sem_handle;
+    CUexternalSemaphore cuda_sem;
 };
 
 static bool cuda_ext_vk_init(struct ra_hwdec_mapper *mapper,
@@ -51,7 +52,7 @@ static bool cuda_ext_vk_init(struct ra_hwdec_mapper *mapper,
     struct cuda_hw_priv *p_owner = mapper->owner->priv;
     struct cuda_mapper_priv *p = mapper->priv;
     CudaFunctions *cu = p_owner->cu;
-    int mem_fd = -1, wait_fd = -1, signal_fd = -1;
+    int mem_fd = -1;
     int ret = 0;
 
     struct ext_vk *evk = talloc_ptrtype(NULL, evk);
@@ -139,45 +140,31 @@ static bool cuda_ext_vk_init(struct ra_hwdec_mapper *mapper,
     if (ret < 0)
         goto error;
 
-    evk->sync = pl_sync_create(gpu, HANDLE_TYPE);
-    if (!evk->sync) {
-        ret = -1;
-        goto error;
+    evk->vk_sem.sem = pl_vulkan_sem_create(gpu, pl_vulkan_sem_params(
+        .type = VK_SEMAPHORE_TYPE_TIMELINE,
+        .export_handle = HANDLE_TYPE,
+        .out_handle = &(evk->sem_handle),
+    ));
+    if (evk->vk_sem.sem == VK_NULL_HANDLE) {
+         ret = -1;
+         goto error;
     }
-
-#if !HAVE_WIN32_DESKTOP
-    wait_fd = dup(evk->sync->wait_handle.fd);
-    signal_fd = dup(evk->sync->signal_handle.fd);
-#endif
+    // The returned FD or Handle is owned by the caller (us).
 
     CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC w_desc = {
 #if HAVE_WIN32_DESKTOP
-        .type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32,
-        .handle.win32.handle = evk->sync->wait_handle.handle,
+        .type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_WIN32,
+        .handle.win32.handle = evk->sem_handle.handle,
 #else
-        .type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD,
-        .handle.fd = wait_fd,
+        .type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_TIMELINE_SEMAPHORE_FD,
+        .handle.fd = evk->sem_handle.fd,
 #endif
     };
-    ret = CHECK_CU(cu->cuImportExternalSemaphore(&evk->ws, &w_desc));
+    ret = CHECK_CU(cu->cuImportExternalSemaphore(&evk->cuda_sem, &w_desc));
     if (ret < 0)
         goto error;
-    wait_fd = -1;
-
-    CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC s_desc = {
-#if HAVE_WIN32_DESKTOP
-        .type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32,
-        .handle.win32.handle = evk->sync->signal_handle.handle,
-#else
-        .type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD,
-        .handle.fd = signal_fd,
-#endif
-    };
-
-    ret = CHECK_CU(cu->cuImportExternalSemaphore(&evk->ss, &s_desc));
-    if (ret < 0)
-        goto error;
-    signal_fd = -1;
+    // CUDA takes ownership of an imported FD *but not* an imported Handle.
+    evk->sem_handle.fd = -1;
 
     return true;
 
@@ -185,10 +172,13 @@ error:
     MP_ERR(mapper, "cuda_ext_vk_init failed\n");
     if (mem_fd > -1)
         close(mem_fd);
-    if (wait_fd > -1)
-        close(wait_fd);
-    if (signal_fd > -1)
-        close(signal_fd);
+#if HAVE_WIN32_DESKTOP
+    if (evk->sem_handle.handle != NULL)
+        CloseHandle(evk->sem_handle.handle);
+#else
+    if (evk->sem_handle.fd > -1)
+        close(evk->sem_handle.fd);
+#endif
     return false;
 }
 
@@ -208,15 +198,14 @@ static void cuda_ext_vk_uninit(const struct ra_hwdec_mapper *mapper, int n)
             CHECK_CU(cu->cuDestroyExternalMemory(evk->mem));
             evk->mem = 0;
         }
-        if (evk->ss) {
-            CHECK_CU(cu->cuDestroyExternalSemaphore(evk->ss));
-            evk->ss = 0;
+        if (evk->cuda_sem) {
+            CHECK_CU(cu->cuDestroyExternalSemaphore(evk->cuda_sem));
+            evk->cuda_sem = 0;
         }
-        if (evk->ws) {
-            CHECK_CU(cu->cuDestroyExternalSemaphore(evk->ws));
-            evk->ws = 0;
-        }
-        pl_sync_destroy(ra_pl_get(mapper->ra), &evk->sync);
+        pl_vulkan_sem_destroy(ra_pl_get(mapper->ra), &evk->vk_sem.sem);
+#if HAVE_WIN32_DESKTOP
+        CloseHandle(evk->sem_handle.handle);
+#endif
     }
     talloc_free(evk);
 }
@@ -229,13 +218,24 @@ static bool cuda_ext_vk_wait(const struct ra_hwdec_mapper *mapper, int n)
     int ret;
     struct ext_vk *evk = p->ext[n];
 
-    ret = pl_tex_export(ra_pl_get(mapper->ra),
-                        evk->pltex, evk->sync);
+    evk->vk_sem.value += 1;
+    ret = pl_vulkan_hold_ex(ra_pl_get(mapper->ra), pl_vulkan_hold_params(
+        .tex = evk->pltex,
+        .layout = VK_IMAGE_LAYOUT_GENERAL,
+        .qf = VK_QUEUE_FAMILY_EXTERNAL,
+        .semaphore = evk->vk_sem,
+    ));
     if (!ret)
         return false;
 
-    CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS wp = { 0, };
-    ret = CHECK_CU(cu->cuWaitExternalSemaphoresAsync(&evk->ws,
+    CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS wp = {
+        .params = {
+            .fence = {
+                .value = evk->vk_sem.value
+            }
+        }
+    };
+    ret = CHECK_CU(cu->cuWaitExternalSemaphoresAsync(&evk->cuda_sem,
                                                      &wp, 1, 0));
     return ret == 0;
 }
@@ -248,36 +248,55 @@ static bool cuda_ext_vk_signal(const struct ra_hwdec_mapper *mapper, int n)
     int ret;
     struct ext_vk *evk = p->ext[n];
 
-    CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS sp = { 0, };
-    ret = CHECK_CU(cu->cuSignalExternalSemaphoresAsync(&evk->ss,
+    evk->vk_sem.value += 1;
+    CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS sp = {
+        .params = {
+            .fence = {
+                .value = evk->vk_sem.value
+            }
+        }
+    };
+    ret = CHECK_CU(cu->cuSignalExternalSemaphoresAsync(&evk->cuda_sem,
                                                        &sp, 1, 0));
+    if (ret != 0)
+        return false;
+
+    pl_vulkan_release_ex(ra_pl_get(mapper->ra), pl_vulkan_release_params(
+        .tex = evk->pltex,
+        .layout = VK_IMAGE_LAYOUT_GENERAL,
+        .qf = VK_QUEUE_FAMILY_EXTERNAL,
+        .semaphore = evk->vk_sem,
+    ));
     return ret == 0;
 }
 
 #undef CHECK_CU
 #define CHECK_CU(x) check_cu(hw, (x), #x)
 
-bool cuda_vk_init(const struct ra_hwdec *hw) {
+static bool cuda_vk_check(const struct ra_hwdec *hw) {
+    pl_gpu gpu = ra_pl_get(hw->ra_ctx->ra);
+    if (gpu == NULL)
+        return false; // This is not a Vulkan RA.
+
+    if (!(gpu->export_caps.tex & HANDLE_TYPE)) {
+        MP_VERBOSE(hw, "CUDA hwdec with Vulkan requires exportable texture memory of type 0x%X.\n",
+                   HANDLE_TYPE);
+        return false;
+    } else if (!(gpu->export_caps.sync & HANDLE_TYPE)) {
+        MP_VERBOSE(hw, "CUDA hwdec with Vulkan requires exportable semaphores of type 0x%X.\n",
+                   HANDLE_TYPE);
+        return false;
+    }
+
+    return true;
+}
+
+static bool cuda_vk_init(const struct ra_hwdec *hw) {
     int ret = 0;
     int level = hw->probing ? MSGL_V : MSGL_ERR;
     struct cuda_hw_priv *p = hw->priv;
     CudaFunctions *cu = p->cu;
-
-    pl_gpu gpu = ra_pl_get(hw->ra);
-    if (gpu != NULL) {
-        if (!(gpu->export_caps.tex & HANDLE_TYPE)) {
-            MP_VERBOSE(hw, "CUDA hwdec with Vulkan requires exportable texture memory of type 0x%X.\n",
-                       HANDLE_TYPE);
-            return false;
-        } else if (!(gpu->export_caps.sync & HANDLE_TYPE)) {
-            MP_VERBOSE(hw, "CUDA hwdec with Vulkan requires exportable semaphores of type 0x%X.\n",
-                       HANDLE_TYPE);
-            return false;
-        }
-    } else {
-        // This is not a Vulkan RA.
-        return false;
-    }
+    pl_gpu gpu = ra_pl_get(hw->ra_ctx->ra);
 
     if (!cu->cuImportExternalMemory) {
         MP_MSG(hw, level, "CUDA hwdec with Vulkan requires driver version 410.48 or newer.\n");
@@ -327,3 +346,7 @@ bool cuda_vk_init(const struct ra_hwdec *hw) {
     return true;
 }
 
+struct cuda_interop_fn cuda_vk_fn = {
+    .check = cuda_vk_check,
+    .init = cuda_vk_init
+};

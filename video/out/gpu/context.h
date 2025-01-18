@@ -1,5 +1,7 @@
 #pragma once
 
+#include <libplacebo/colorspace.h>
+
 #include "video/out/vo.h"
 #include "video/csputils.h"
 
@@ -10,8 +12,8 @@ struct ra_ctx_opts {
     bool want_alpha;      // create an alpha framebuffer if possible
     bool debug;           // enable debugging layers/callbacks etc.
     bool probing;        // the backend was auto-probed
-    char *context_name;  // filter by `ra_ctx_fns.name`
-    char *context_type;  // filter by `ra_ctx_fns.type`
+    struct m_obj_settings *context_list; // list of `ra_ctx_fns.name` to probe
+    struct m_obj_settings *context_type_list;  // list of `ra_ctx_fns.type` to probe
 };
 
 extern const struct m_sub_options ra_ctx_conf;
@@ -34,13 +36,16 @@ struct ra_ctx {
 struct ra_ctx_fns {
     const char *type; // API type (for --gpu-api)
     const char *name; // name (for --gpu-context)
-
-    bool hidden; // hide the ra_ctx from users
+    const char *description; // description (for --gpu-context=help)
 
     // Resize the window, or create a new window if there isn't one yet.
     // Currently, there is an unfortunate interaction with ctx->vo, and
     // display size etc. are determined by it.
     bool (*reconfig)(struct ra_ctx *ctx);
+
+    // Signal if the underlying context can use colorspace/hdr related functionality
+    // on its own.
+    bool (*pass_colorspace)(struct ra_ctx *ctx);
 
     // This behaves exactly like vo_driver.control().
     int (*control)(struct ra_ctx *ctx, int *events, int request, void *arg);
@@ -48,7 +53,7 @@ struct ra_ctx_fns {
     // These behave exactly like vo_driver.wakeup/wait_events. They are
     // optional.
     void (*wakeup)(struct ra_ctx *ctx);
-    void (*wait_events)(struct ra_ctx *ctx, int64_t until_time_us);
+    void (*wait_events)(struct ra_ctx *ctx, int64_t until_time_ns);
     void (*update_render_opts)(struct ra_ctx *ctx);
 
     // Initialize/destroy the 'struct ra' and possibly the underlying VO backend.
@@ -72,12 +77,17 @@ struct ra_fbo {
 
     // Host system's colorspace that it will be interpreting
     // the frame buffer as.
-    struct mp_colorspace color_space;
+    struct pl_color_space color_space;
 };
+
+typedef struct pl_color_space pl_color_space_t;
 
 struct ra_swapchain_fns {
     // Gets the current framebuffer depth in bits (0 if unknown). Optional.
     int (*color_depth)(struct ra_swapchain *sw);
+
+    // Target device color space. Optional.
+    pl_color_space_t (*target_csp)(struct ra_swapchain *sw);
 
     // Called when rendering starts. Returns NULL on failure. This must be
     // followed by submit_frame, to submit the rendered frame. This function

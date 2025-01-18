@@ -45,16 +45,17 @@ static bool map(struct ra_hwdec_mapper *mapper,
         MP_VERBOSE(mapper, "Mapped surface has separate layers - expected composed layers.\n");
         return false;
     } else if (!ra_compatible_format(mapper->ra, drm_format,
-        mapper_p->desc.objects[0].format_modifier)) {
-        MP_VERBOSE(mapper, "Mapped surface with format %s; drm format '%s(%016lx)' "
-                   "is not supported by compositor.\n",
+               mapper_p->desc.objects[0].format_modifier)) {
+        MP_VERBOSE(mapper, "Mapped surface with format %s; drm format '%s(%016" PRIx64 ")' "
+                   "is not supported by compositor and GPU combination.\n",
                    mp_imgfmt_to_name(mapper->src->params.hw_subfmt),
                    mp_tag_str(drm_format),
                    mapper_p->desc.objects[0].format_modifier);
         return false;
     }
 
-    MP_VERBOSE(mapper, "Supported Wayland display format: '%s(%016lx)'\n",
+    MP_VERBOSE(mapper, "Supported Wayland display format %s: '%s(%016" PRIx64 ")'\n",
+               mp_imgfmt_to_name(mapper->src->params.hw_subfmt),
                mp_tag_str(drm_format), mapper_p->desc.objects[0].format_modifier);
 
     return true;
@@ -67,7 +68,7 @@ static void unmap(struct ra_hwdec_mapper *mapper)
 bool dmabuf_interop_wl_init(const struct ra_hwdec *hw,
                             struct dmabuf_interop *dmabuf_interop)
 {
-    if (!ra_is_wldmabuf(hw->ra))
+    if (!ra_is_wldmabuf(hw->ra_ctx->ra))
         return false;
 
     if (strstr(hw->driver->name, "vaapi") != NULL)

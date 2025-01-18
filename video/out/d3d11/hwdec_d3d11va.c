@@ -73,9 +73,9 @@ static int init(struct ra_hwdec *hw)
     struct priv_owner *p = hw->priv;
     HRESULT hr;
 
-    if (!ra_is_d3d11(hw->ra))
+    if (!ra_is_d3d11(hw->ra_ctx->ra))
         return -1;
-    p->device = ra_d3d11_get_device(hw->ra);
+    p->device = ra_d3d11_get_device(hw->ra_ctx->ra);
     if (!p->device)
         return -1;
 
@@ -108,6 +108,12 @@ static int init(struct ra_hwdec *hw)
         .supported_formats = subfmts,
         .hw_imgfmt = IMGFMT_D3D11,
     };
+
+    if (!p->hwctx.av_device_ref) {
+        MP_VERBOSE(hw, "Failed to create hwdevice_ctx\n");
+        return -1;
+    }
+
     hwdec_devices_add(hw->devs, &p->hwctx);
     return 0;
 }
@@ -240,6 +246,7 @@ const struct ra_hwdec_driver ra_hwdec_d3d11va = {
     .name = "d3d11va",
     .priv_size = sizeof(struct priv_owner),
     .imgfmts = {IMGFMT_D3D11, 0},
+    .device_type = AV_HWDEVICE_TYPE_D3D11VA,
     .init = init,
     .uninit = uninit,
     .mapper = &(const struct ra_hwdec_mapper_driver){

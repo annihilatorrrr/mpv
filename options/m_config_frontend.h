@@ -17,19 +17,18 @@
 
 #pragma once
 
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 #include "common/common.h"
-#include "common/global.h"
 #include "common/msg.h"
 #include "common/msg_control.h"
 #include "m_config_core.h"
 #include "misc/bstr.h"
 #include "misc/dispatch.h"
 #include "options/m_option.h"
-#include "osdep/atomic.h"
 
 // m_config provides an API to manipulate the config variables in MPlayer.
 // It makes use of the Options API to provide a context stack that
@@ -115,10 +114,9 @@ struct m_config *m_config_new(void *talloc_ctx, struct mp_log *log,
 // different sub-options for every filter (represented by separate desc
 // structs).
 // args is an array of key/value pairs (args=[k0, v0, k1, v1, ..., NULL]).
-// name/defaults is only needed for the legacy af-defaults/vf-defaults options.
 struct m_config *m_config_from_obj_desc_and_args(void *ta_parent,
     struct mp_log *log, struct mpv_global *global, struct m_obj_desc *desc,
-    const char *name, struct m_obj_settings *defaults, char **args);
+    char **args);
 
 // Like m_config_from_obj_desc_and_args(), but don't allocate option the
 // struct, i.e. m_config.optstruct==NULL. This is used by the sub-option

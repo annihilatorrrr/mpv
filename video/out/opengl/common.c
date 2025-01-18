@@ -25,7 +25,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 #include <stdbool.h>
 #include <math.h>
 #include <assert.h>
@@ -398,7 +397,7 @@ static const struct gl_functions gl_functions[] = {
         .provides = MPGL_CAP_NESTED_ARRAY,
     },
     // Swap control, always an OS specific extension
-    // The OSX code loads this manually.
+    // The macOS code loads this manually.
     {
         .extension = "GLX_SGI_swap_control",
         .functions = (const struct gl_function[]) {

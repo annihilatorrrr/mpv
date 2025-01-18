@@ -431,7 +431,7 @@ static bool render_rgba(struct mp_draw_sub_cache *p, struct part *part,
                 mp_image_set_size(&src_img, sw, sh);
                 src_img.planes[0] = s_ptr;
                 src_img.stride[0] = s_stride;
-                src_img.params.alpha = MP_ALPHA_PREMUL;
+                src_img.params.repr.alpha = PL_ALPHA_PREMULTIPLIED;
 
                 scaled = mp_image_alloc(IMGFMT_BGRA, dw, dh);
                 if (!scaled)
@@ -485,6 +485,10 @@ static void clear_rgba_overlay(struct mp_draw_sub_cache *p)
         for (int sx = 0; sx < p->s_w; sx++) {
             struct slice *s = &line[sx];
 
+            // Ensure this final slice doesn't extend beyond the width of p->s_w
+            if (s->x1 == SLICE_W && sx == p->s_w - 1 && y == p->rgba_overlay->h - 1)
+                s->x1 = MPMIN(p->w - ((p->s_w - 1) * SLICE_W), s->x1);
+
             if (s->x0 <= s->x1) {
                 memset(px + s->x0, 0, (s->x1 - s->x0) * 4);
                 *s = (struct slice){SLICE_W, 0};
@@ -521,7 +525,7 @@ static bool reinit_to_video(struct mp_draw_sub_cache *p)
     struct mp_image_params *params = &p->params;
     mp_image_params_guess_csp(params);
 
-    bool need_premul = params->alpha != MP_ALPHA_PREMUL &&
+    bool need_premul = params->repr.alpha != PL_ALPHA_PREMULTIPLIED &&
         (mp_imgfmt_get_desc(params->imgfmt).flags & MP_IMGFLAG_ALPHA);
 
     // Intermediate format for video_overlay. Requirements:
@@ -542,7 +546,7 @@ static bool reinit_to_video(struct mp_draw_sub_cache *p)
     mp_get_regular_imgfmt(&vfdesc, mp_repack_get_format_dst(p->video_to_f32));
     assert(vfdesc.num_planes); // must have succeeded
 
-    if (params->color.space == MP_CSP_RGB && vfdesc.num_planes >= 3) {
+    if (params->repr.sys == PL_COLOR_SYSTEM_RGB && vfdesc.num_planes >= 3) {
         use_shortcut = true;
 
         if (vfdesc.component_type == MP_COMPONENT_TYPE_UINT &&
@@ -656,9 +660,11 @@ static bool reinit_to_video(struct mp_draw_sub_cache *p)
         return false;
 
     mp_image_params_guess_csp(&p->rgba_overlay->params);
-    p->rgba_overlay->params.alpha = MP_ALPHA_PREMUL;
+    p->rgba_overlay->params.repr.alpha = PL_ALPHA_PREMULTIPLIED;
 
+    p->overlay_tmp->params.repr = params->repr;
     p->overlay_tmp->params.color = params->color;
+    p->video_tmp->params.repr = params->repr;
     p->video_tmp->params.color = params->color;
 
     if (p->rgba_overlay->imgfmt == overlay_fmt) {
@@ -671,12 +677,13 @@ static bool reinit_to_video(struct mp_draw_sub_cache *p)
         if (!p->video_overlay)
             return false;
 
+        p->video_overlay->params.repr = params->repr;
         p->video_overlay->params.color = params->color;
         p->video_overlay->params.chroma_location = params->chroma_location;
-        p->video_overlay->params.alpha = MP_ALPHA_PREMUL;
+        p->video_overlay->params.repr.alpha = PL_ALPHA_PREMULTIPLIED;
 
         if (p->scale_in_tiles)
-            p->video_overlay->params.chroma_location = MP_CHROMA_CENTER;
+            p->video_overlay->params.chroma_location = PL_CHROMA_CENTER;
 
         p->rgba_to_overlay = alloc_scaler(p);
         p->rgba_to_overlay->allow_zimg = true;
@@ -720,13 +727,14 @@ static bool reinit_to_video(struct mp_draw_sub_cache *p)
             p->alpha_overlay->stride[0] = p->video_overlay->stride[aplane];
 
             // Full range gray always has the same range as alpha.
-            p->alpha_overlay->params.color.levels = MP_CSP_LEVELS_PC;
+            p->alpha_overlay->params.repr.levels = PL_COLOR_LEVELS_FULL;
             mp_image_params_guess_csp(&p->alpha_overlay->params);
 
             p->calpha_overlay =
                 talloc_steal(p, mp_image_alloc(calpha_fmt, w >> xs, h >> ys));
             if (!p->calpha_overlay)
                 return false;
+            p->calpha_overlay->params.repr = p->alpha_overlay->params.repr;
             p->calpha_overlay->params.color = p->alpha_overlay->params.color;
 
             p->calpha_to_f32 = mp_repack_create_planar(calpha_fmt, false, rflags);
@@ -758,7 +766,7 @@ static bool reinit_to_video(struct mp_draw_sub_cache *p)
         if (!p->premul_tmp)
             return false;
         mp_image_set_params(p->premul_tmp, params);
-        p->premul_tmp->params.alpha = MP_ALPHA_PREMUL;
+        p->premul_tmp->params.repr.alpha = PL_ALPHA_PREMULTIPLIED;
 
         // Only zimg supports this.
         p->premul->force_scaler = MP_SWS_ZIMG;
@@ -783,7 +791,7 @@ static bool reinit_to_overlay(struct mp_draw_sub_cache *p)
         return false;
 
     mp_image_params_guess_csp(&p->rgba_overlay->params);
-    p->rgba_overlay->params.alpha = MP_ALPHA_PREMUL;
+    p->rgba_overlay->params.repr.alpha = PL_ALPHA_PREMULTIPLIED;
 
     // Some non-sense with the intention to somewhat isolate the returned image.
     mp_image_setfmt(&p->res_overlay, p->rgba_overlay->imgfmt);
@@ -964,7 +972,8 @@ static void mark_rcs(struct mp_draw_sub_cache *p, struct rc_grid *gr)
                 rc->y0 = MPMIN(rc->y0, y);
                 rc->y1 = MPMAX(rc->y1, y + 1);
                 rc->x0 = MPMIN(rc->x0, xpos + s->x0);
-                rc->x1 = MPMAX(rc->x1, xpos + s->x1);
+                // Ensure this does not extend beyond the total width
+                rc->x1 = MPCLAMP(xpos + s->x1, rc->x1, p->w);
             }
         }
     }

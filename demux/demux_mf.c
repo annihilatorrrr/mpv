@@ -16,10 +16,9 @@
  */
 
 #include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 
@@ -68,7 +67,7 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
     if (filename[0] == '@') {
         struct stream *s = stream_create(filename + 1,
                             d->stream_origin | STREAM_READ, d->cancel, d->global);
-        if (s) {
+        if (s && !s->is_directory) {
             while (1) {
                 char buf[512];
                 int len = stream_read_peek(s, buf, sizeof(buf));
@@ -84,7 +83,7 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
                         break;
                     }
                     char *entry = bstrto0(mf, fname);
-                    if (!mp_path_exists(entry)) {
+                    if (!mp_path_exists(entry) && !mp_is_url(fname)) {
                         mp_verbose(log, "file not found: '%s'\n", entry);
                     } else {
                         MP_TARRAY_APPEND(mf, mf->names, mf->nr_of_files, entry);
@@ -94,9 +93,9 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
             }
             free_stream(s);
 
-            mp_info(log, "number of files: %d\n", mf->nr_of_files);
             goto exit_mf;
         }
+        free_stream(s);
         mp_info(log, "%s is not indirect filelist\n", filename + 1);
     }
 
@@ -109,22 +108,25 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
             bstr_split_tok(bfilename, ",", &bfname, &bfilename);
             char *fname2 = bstrdup0(mf, bfname);
 
-            if (!mp_path_exists(fname2))
+            if (!mp_path_exists(fname2) && !mp_is_url(bfname))
                 mp_verbose(log, "file not found: '%s'\n", fname2);
             else {
                 mf_add(mf, fname2);
             }
             talloc_free(fname2);
         }
-        mp_info(log, "number of files: %d\n", mf->nr_of_files);
 
         goto exit_mf;
     }
 
-    size_t fname_avail = strlen(filename) + 32;
+    bstr bfilename = bstr0(filename);
+    if (mp_is_url(bfilename))
+        goto exit_mf;
+
+    size_t fname_avail = bfilename.len + 32;
     char *fname = talloc_size(mf, fname_avail);
 
-#if HAVE_GLOB
+#if HAVE_GLOB && !defined(FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
     if (!strchr(filename, '%')) {
         // append * if none present
         snprintf(fname, fname_avail, "%s%c", filename,
@@ -142,7 +144,6 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
                 continue;
             mf_add(mf, gg.gl_pathv[i]);
         }
-        mp_info(log, "number of files: %d\n", mf->nr_of_files);
         globfree(&gg);
         goto exit_mf;
     }
@@ -153,29 +154,44 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
     // simplicity we reject all conversion specifiers except %% and simple
     // integer specifier: %[.][NUM]d where NUM is 1-3 digits (%.d is valid)
     const char *f = filename;
-    int MAXDIGS = 3, nspec = 0, bad_spec = 0, c;
+    int MAXDIGS = 3, nspec = 0, c;
+    bool bad_spec = false;
 
     while (nspec < 2 && (c = *f++)) {
         if (c != '%')
             continue;
-        if (*f != '%') {
-            nspec++;  // conversion specifier which isn't %%
-            if (*f == '.')
-                f++;
-            for (int ndig = 0; mp_isdigit(*f) && ndig < MAXDIGS; ndig++, f++)
-                /* no-op */;
-            if (*f != 'd') {
-                bad_spec++;  // not int, or beyond our validation capacity
-                break;
-            }
+
+        if (*f == '%') {
+            // '%%', which ends up as an explicit % in the output.
+            // Skipping forwards as it doesn't require further attention.
+            f++;
+            continue;
         }
-        // *f is '%' or 'd'
+
+        // Now c == '%' and *f != '%', thus we have entered territory of format
+        // specifiers which we are interested in.
+        nspec++;
+
+        if (*f == '.')
+            f++;
+
+        for (int ndig = 0; mp_isdigit(*f) && ndig < MAXDIGS; ndig++, f++)
+            /* no-op */;
+
+        if (*f != 'd') {
+            bad_spec = true; // not int, or beyond our validation capacity
+            break;
+        }
+
+        // *f is 'd'
         f++;
     }
 
     // nspec==0 (zero specifiers) is rejected because fname wouldn't advance.
     if (bad_spec || nspec != 1) {
-        mp_err(log, "unsupported expr format: '%s'\n", filename);
+        mp_err(log,
+               "unsupported expr format: '%s' - exactly one format specifier of the form %%[.][NUM]d is expected\n",
+               filename);
         goto exit_mf;
     }
 
@@ -194,9 +210,8 @@ static mf_t *open_mf_pattern(void *talloc_ctx, struct demuxer *d, char *filename
         }
     }
 
-    mp_info(log, "number of files: %d\n", mf->nr_of_files);
-
 exit_mf:
+    mp_info(log, "number of files: %d\n", mf->nr_of_files);
     return mf;
 }
 
@@ -323,6 +338,9 @@ static const struct {
     { "qoi",            "qoi" },
     { "xface",          "xface" },
     { "xwd",            "xwd" },
+    { "svg",            "svg" },
+    { "webp",           "webp" },
+    { "jxl",            "jpegxl" },
     {0}
 };
 
@@ -367,15 +385,9 @@ static int demux_open_mf(demuxer_t *demuxer, enum demux_check check)
     if (!mf || mf->nr_of_files < 1)
         goto error;
 
-    double mf_fps;
-    char *mf_type;
-    mp_read_option_raw(demuxer->global, "mf-fps", &m_option_type_double, &mf_fps);
-    mp_read_option_raw(demuxer->global, "mf-type", &m_option_type_string, &mf_type);
-
     const char *codec = mp_map_mimetype_to_video_codec(demuxer->stream->mime_type);
-    if (!codec || (mf_type && mf_type[0]))
-        codec = probe_format(mf, mf_type, check);
-    talloc_free(mf_type);
+    if (!codec || (demuxer->opts->mf_type && demuxer->opts->mf_type[0]))
+        codec = probe_format(mf, demuxer->opts->mf_type, check);
     if (!codec)
         goto error;
 
@@ -392,7 +404,7 @@ static int demux_open_mf(demuxer_t *demuxer, enum demux_check check)
     c->codec = codec;
     c->disp_w = 0;
     c->disp_h = 0;
-    c->fps = mf_fps;
+    c->fps = demuxer->opts->mf_fps;
     c->reliable_fps = true;
 
     demux_add_sh_stream(demuxer, sh);

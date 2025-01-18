@@ -2,14 +2,12 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 
 #include "osdep/io.h"
 
 #include "common/common.h"
 #include "common/msg.h"
-#include "common/global.h"
 #include "stream.h"
 #include "options/m_option.h"
 #include "options/path.h"

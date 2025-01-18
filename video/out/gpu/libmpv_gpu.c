@@ -81,14 +81,14 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
             void *data = params[n].data;
             if (entry->size)
                 data = talloc_memdup(p, data, entry->size);
-            ra_add_native_resource(p->context->ra, entry->name, data);
+            ra_add_native_resource(p->context->ra_ctx->ra, entry->name, data);
         }
     }
 
-    p->renderer = gl_video_init(p->context->ra, ctx->log, ctx->global);
+    p->renderer = gl_video_init(p->context->ra_ctx->ra, ctx->log, ctx->global);
 
     ctx->hwdec_devs = hwdec_devices_create();
-    gl_video_init_hwdecs(p->renderer, ctx->hwdec_devs, true);
+    gl_video_init_hwdecs(p->renderer, p->context->ra_ctx, ctx->hwdec_devs, true);
     ctx->driver_caps = VO_CAP_ROTATE90;
     return 0;
 }
@@ -107,12 +107,14 @@ static int set_parameter(struct render_backend *ctx, mpv_render_param param)
     switch (param.type) {
     case MPV_RENDER_PARAM_ICC_PROFILE: {
         mpv_byte_array *data = param.data;
-        gl_video_set_icc_profile(p->renderer, (bstr){data->data, data->size});
+        gl_video_set_icc_profile(p->renderer, bstrdup(NULL, (bstr){data->data, data->size}));
         return 0;
     }
     case MPV_RENDER_PARAM_AMBIENT_LIGHT: {
+        MP_WARN(ctx, "MPV_RENDER_PARAM_AMBIENT_LIGHT is deprecated and might be "
+                     "removed in the future (replacement: gamma-auto.lua)\n");
         int lux = *(int *)param.data;
-        gl_video_set_ambient_lux(p->renderer, lux);
+        gl_video_set_ambient_lux(p->renderer, (double)lux);
         return 0;
     }
     default:
@@ -185,7 +187,7 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
                                              &(int){0});
 
     struct ra_fbo target = {.tex = tex, .flip = flip};
-    gl_video_render_frame(p->renderer, frame, target, RENDER_FRAME_DEF);
+    gl_video_render_frame(p->renderer, frame, &target, RENDER_FRAME_DEF);
     p->context->fns->done_frame(p->context, frame->display_synced);
 
     return 0;

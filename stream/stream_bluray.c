@@ -27,7 +27,6 @@
  */
 
 #include <string.h>
-#include <strings.h>
 #include <assert.h>
 
 #include <libbluray/bluray.h>
@@ -43,6 +42,7 @@
 #include "common/common.h"
 #include "common/msg.h"
 #include "options/m_config.h"
+#include "options/options.h"
 #include "options/path.h"
 #include "stream.h"
 #include "osdep/timer.h"
@@ -73,6 +73,20 @@
 #define AACS_ERROR_MMC_FAILURE    -7 /* MMC failed */
 #define AACS_ERROR_NO_DK          -8 /* no matching device key */
 
+
+struct bluray_opts {
+    char *bluray_device;
+};
+
+#define OPT_BASE_STRUCT struct bluray_opts
+const struct m_sub_options stream_bluray_conf = {
+    .opts = (const struct m_option[]) {
+        {"device", OPT_STRING(bluray_device), .flags = M_OPT_FILE},
+        {0},
+    },
+    .size = sizeof(struct bluray_opts),
+};
+
 struct bluray_priv_s {
     BLURAY *bd;
     BLURAY_TITLE_INFO *title_info;
@@ -86,6 +100,8 @@ struct bluray_priv_s {
     char *cfg_device;
 
     bool use_nav;
+    struct bluray_opts *opts;
+    struct m_config_cache *opts_cache;
 };
 
 static void destruct(struct bluray_priv_s *priv)
@@ -250,6 +266,26 @@ static int bluray_stream_control(stream_t *s, int cmd, void *arg)
         bd_seamless_angle_change(b->bd, angle);
         return STREAM_OK;
     }
+    case STREAM_CTRL_GET_TITLE_LENGTH: {
+        int title = *(double *)arg;
+        if (!b->bd || title < 0 || title >= b->num_titles)
+            return STREAM_UNSUPPORTED;
+        const BLURAY_TITLE_INFO *ti = bd_get_title_info(b->bd, title, 0);
+        if (!ti)
+            return STREAM_UNSUPPORTED;
+        *(double *)arg = BD_TIME_TO_MP(ti->duration);
+        return STREAM_OK;
+    }
+    case STREAM_CTRL_GET_TITLE_PLAYLIST: {
+        int title = *(double *)arg;
+        if (!b->bd || title < 0 || title >= b->num_titles)
+            return STREAM_UNSUPPORTED;
+        const BLURAY_TITLE_INFO *ti = bd_get_title_info(b->bd, title, 0);
+        if (!ti)
+            return STREAM_UNSUPPORTED;
+        *(double *)arg = ti->playlist;
+        return STREAM_OK;
+    }
     case STREAM_CTRL_GET_LANG: {
         const BLURAY_TITLE_INFO *ti = b->title_info;
         if (ti && ti->clip_count) {
@@ -377,8 +413,7 @@ static int bluray_stream_open_internal(stream_t *s)
     if (b->cfg_device && b->cfg_device[0]) {
         device = b->cfg_device;
     } else {
-        mp_read_option_raw(s->global, "bluray-device", &m_option_type_string,
-                           &device);
+        device = b->opts->bluray_device;
     }
 
     if (!device || !device[0]) {
@@ -466,6 +501,12 @@ static int bluray_stream_open(stream_t *s)
     struct bluray_priv_s *b = talloc_zero(s, struct bluray_priv_s);
     s->priv = b;
 
+    struct m_config_cache *opts_cache =
+        m_config_cache_alloc(s, s->global, &stream_bluray_conf);
+
+    b->opts_cache = opts_cache;
+    b->opts = opts_cache->opts;
+
     b->use_nav = s->info == &stream_info_bdnav;
 
     bstr title, bdevice, rest = { .len = 0 };
@@ -473,7 +514,13 @@ static int bluray_stream_open(stream_t *s)
 
     b->cfg_title = BLURAY_DEFAULT_TITLE;
 
-    if (bstr_equals0(title, "longest") || bstr_equals0(title, "first")) {
+    struct MPOpts *opts = mp_get_config_group(s, s->global, &mp_opt_root);
+    int edition_id = opts->edition_id;
+    talloc_free(opts);
+
+    if (edition_id >= 0) {
+        b->cfg_title = edition_id;
+    } else if (bstr_equals0(title, "longest") || bstr_equals0(title, "first")) {
         b->cfg_title = BLURAY_DEFAULT_TITLE;
     } else if (bstr_equals0(title, "menu")) {
         b->cfg_title = BLURAY_MENU_TITLE;
@@ -531,16 +578,18 @@ static bool check_bdmv(const char *path)
     if (!temp)
         return false;
 
-    char data[50] = {0};
+    char data[50];
+    bool ret = false;
 
-    fread(data, 50, 1, temp);
+    if (fread(data, 50, 1, temp) == 1) {
+        bstr bdata = {data, 50};
+        ret = bstr_startswith0(bdata, "MOBJ0100") || // AVCHD
+              bstr_startswith0(bdata, "MOBJ0200") || // Blu-ray
+              bstr_startswith0(bdata, "MOBJ0300");   // UHD BD
+    }
+
     fclose(temp);
-
-    bstr bdata = {data, 50};
-
-    return bstr_startswith0(bdata, "MOBJ0100") || // AVCHD
-           bstr_startswith0(bdata, "MOBJ0200") || // Blu-ray
-           bstr_startswith0(bdata, "MOBJ0300");   // UHD BD
+    return ret;
 }
 
 // Destructively remove the current trailing path component.

@@ -24,11 +24,11 @@
 #include <stdbool.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <errno.h>
 
 #include "config.h"
 
+#include "misc/path_utils.h"
 #include "common/common.h"
 #include "common/global.h"
 #include "common/msg.h"
@@ -42,9 +42,11 @@
 // In order of decreasing priority: the first has highest priority.
 static const mp_get_platform_path_cb path_resolvers[] = {
 #if HAVE_COCOA
-    mp_get_platform_path_osx,
+    mp_get_platform_path_mac,
 #endif
-#if !defined(_WIN32) || defined(__CYGWIN__)
+#if HAVE_DARWIN
+    mp_get_platform_path_darwin,
+#elif !defined(_WIN32) || defined(__CYGWIN__)
     mp_get_platform_path_unix,
 #endif
 #if HAVE_UWP
@@ -63,6 +65,46 @@ static const char *const config_dirs[] = {
     "global",
 };
 
+// Return a platform specific path using a path type as defined in osdep/path.h.
+// Keep in mind that the only way to free the return value is freeing talloc_ctx
+// (or its children), as this function can return a statically allocated string.
+static const char *mp_get_platform_path(void *talloc_ctx,
+                                        struct mpv_global *global,
+                                        const char *type)
+{
+    assert(talloc_ctx);
+
+    if (global->configdir) {
+        // Return NULL for all platform paths if --no-config is passed
+        if (!global->configdir[0])
+            return NULL;
+
+        // force all others to NULL, only first returns the path
+        for (int n = 0; n < MP_ARRAY_SIZE(config_dirs); n++) {
+            if (strcmp(config_dirs[n], type) == 0)
+                return (n == 0) ? global->configdir : NULL;
+        }
+    }
+
+    // Return the native config path if the platform doesn't support the
+    // type we are trying to fetch.
+    const char *fallback_type = NULL;
+    if (!strcmp(type, "cache") || !strcmp(type, "state"))
+        fallback_type = "home";
+
+    for (int n = 0; n < MP_ARRAY_SIZE(path_resolvers); n++) {
+        const char *path = path_resolvers[n](talloc_ctx, type);
+        if (path && path[0])
+            return path;
+    }
+
+    if (fallback_type) {
+        assert(strcmp(fallback_type, type) != 0);
+        return mp_get_platform_path(talloc_ctx, global, fallback_type);
+    }
+    return NULL;
+}
+
 void mp_init_paths(struct mpv_global *global, struct MPOpts *opts)
 {
     TA_FREEP(&global->configdir);
@@ -76,39 +118,15 @@ void mp_init_paths(struct mpv_global *global, struct MPOpts *opts)
     global->configdir = talloc_strdup(global, force_configdir);
 }
 
-// Return a platform specific path using a path type as defined in osdep/path.h.
-// Keep in mind that the only way to free the return value is freeing talloc_ctx
-// (or its children), as this function can return a statically allocated string.
-static const char *mp_get_platform_path(void *talloc_ctx,
-                                        struct mpv_global *global,
-                                        const char *type)
-{
-    assert(talloc_ctx);
-
-    if (global->configdir) {
-        for (int n = 0; n < MP_ARRAY_SIZE(config_dirs); n++) {
-            if (strcmp(config_dirs[n], type) == 0)
-                return (n == 0 && global->configdir[0]) ? global->configdir : NULL;
-        }
-    }
-
-    for (int n = 0; n < MP_ARRAY_SIZE(path_resolvers); n++) {
-        const char *path = path_resolvers[n](talloc_ctx, type);
-        if (path && path[0])
-            return path;
-    }
-    return NULL;
-}
-
-char *mp_find_user_config_file(void *talloc_ctx, struct mpv_global *global,
-                               const char *filename)
+char *mp_find_user_file(void *talloc_ctx, struct mpv_global *global,
+                        const char *type, const char *filename)
 {
     void *tmp = talloc_new(NULL);
-    char *res = (char *)mp_get_platform_path(tmp, global, config_dirs[0]);
+    char *res = (char *)mp_get_platform_path(tmp, global, type);
     if (res)
         res = mp_path_join(talloc_ctx, res, filename);
     talloc_free(tmp);
-    MP_DBG(global, "config path: '%s' -> '%s'\n", filename, res ? res : "-");
+    MP_DBG(global, "%s path: '%s' -> '%s'\n", type, filename, res ? res : "-");
     return res;
 }
 
@@ -203,182 +221,9 @@ char *mp_get_user_path(void *talloc_ctx, struct mpv_global *global,
     return res;
 }
 
-char *mp_basename(const char *path)
+void mp_mk_user_dir(struct mpv_global *global, const char *type, char *subdir)
 {
-    char *s;
-
-#if HAVE_DOS_PATHS
-    s = strrchr(path, '\\');
-    if (s)
-        path = s + 1;
-    s = strrchr(path, ':');
-    if (s)
-        path = s + 1;
-#endif
-    s = strrchr(path, '/');
-    return s ? s + 1 : (char *)path;
-}
-
-struct bstr mp_dirname(const char *path)
-{
-    struct bstr ret = {
-        (uint8_t *)path, mp_basename(path) - path
-    };
-    if (ret.len == 0)
-        return bstr0(".");
-    return ret;
-}
-
-
-#if HAVE_DOS_PATHS
-static const char mp_path_separators[] = "\\/";
-#else
-static const char mp_path_separators[] = "/";
-#endif
-
-// Mutates path and removes a trailing '/' (or '\' on Windows)
-void mp_path_strip_trailing_separator(char *path)
-{
-    size_t len = strlen(path);
-    if (len > 0 && strchr(mp_path_separators, path[len - 1]))
-        path[len - 1] = '\0';
-}
-
-char *mp_splitext(const char *path, bstr *root)
-{
-    assert(path);
-    const char *split = strrchr(path, '.');
-    if (!split || !split[1] || strchr(split, '/'))
-        return NULL;
-    if (root)
-        *root = (bstr){(char *)path, split - path};
-    return (char *)split + 1;
-}
-
-bool mp_path_is_absolute(struct bstr path)
-{
-    if (path.len && strchr(mp_path_separators, path.start[0]))
-        return true;
-
-#if HAVE_DOS_PATHS
-    // Note: "X:filename" is a path relative to the current working directory
-    //       of drive X, and thus is not an absolute path. It needs to be
-    //       followed by \ or /.
-    if (path.len >= 3 && path.start[1] == ':' &&
-        strchr(mp_path_separators, path.start[2]))
-        return true;
-#endif
-
-    return false;
-}
-
-char *mp_path_join_bstr(void *talloc_ctx, struct bstr p1, struct bstr p2)
-{
-    if (p1.len == 0)
-        return bstrdup0(talloc_ctx, p2);
-    if (p2.len == 0)
-        return bstrdup0(talloc_ctx, p1);
-
-    if (mp_path_is_absolute(p2))
-        return bstrdup0(talloc_ctx, p2);
-
-    bool have_separator = strchr(mp_path_separators, p1.start[p1.len - 1]);
-#if HAVE_DOS_PATHS
-    // "X:" only => path relative to "X:" current working directory.
-    if (p1.len == 2 && p1.start[1] == ':')
-        have_separator = true;
-#endif
-
-    return talloc_asprintf(talloc_ctx, "%.*s%s%.*s", BSTR_P(p1),
-                           have_separator ? "" : "/", BSTR_P(p2));
-}
-
-char *mp_path_join(void *talloc_ctx, const char *p1, const char *p2)
-{
-    return mp_path_join_bstr(talloc_ctx, bstr0(p1), bstr0(p2));
-}
-
-char *mp_getcwd(void *talloc_ctx)
-{
-    char *e_wd = getenv("PWD");
-    if (e_wd)
-        return talloc_strdup(talloc_ctx, e_wd);
-
-    char *wd = talloc_array(talloc_ctx, char, 20);
-    while (getcwd(wd, talloc_get_size(wd)) == NULL) {
-        if (errno != ERANGE) {
-            talloc_free(wd);
-            return NULL;
-        }
-        wd = talloc_realloc(talloc_ctx, wd, char, talloc_get_size(wd) * 2);
-    }
-    return wd;
-}
-
-bool mp_path_exists(const char *path)
-{
-    struct stat st;
-    return path && stat(path, &st) == 0;
-}
-
-bool mp_path_isdir(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-// Return false if it's considered a normal local filesystem path.
-bool mp_is_url(bstr path)
-{
-    int proto = bstr_find0(path, "://");
-    if (proto < 1)
-        return false;
-    // Per RFC3986, the first character of the protocol must be alphabetic.
-    // The rest must be alphanumeric plus -, + and .
-    for (int i = 0; i < proto; i++) {
-        unsigned char c = path.start[i];
-        if ((i == 0 && !mp_isalpha(c)) ||
-            (!mp_isalnum(c) && c != '.' && c != '-' && c != '+'))
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-// Return the protocol part of path, e.g. "http" if path is "http://...".
-// On success, out_url (if not NULL) is set to the part after the "://".
-bstr mp_split_proto(bstr path, bstr *out_url)
-{
-    if (!mp_is_url(path))
-        return (bstr){0};
-    bstr r;
-    bstr_split_tok(path, "://", &r, out_url ? out_url : &(bstr){0});
-    return r;
-}
-
-void mp_mkdirp(const char *dir)
-{
-    char *path = talloc_strdup(NULL, dir);
-    char *cdir = path + 1;
-
-    while (cdir) {
-        cdir = strchr(cdir, '/');
-        if (cdir)
-            *cdir = 0;
-
-        mkdir(path, 0700);
-
-        if (cdir)
-            *cdir++ = '/';
-    }
-
-    talloc_free(path);
-}
-
-void mp_mk_config_dir(struct mpv_global *global, char *subdir)
-{
-    char *dir = mp_find_user_config_file(NULL, global, subdir);
+    char *dir = mp_find_user_file(NULL, global, type, subdir);
     if (dir)
         mp_mkdirp(dir);
     talloc_free(dir);

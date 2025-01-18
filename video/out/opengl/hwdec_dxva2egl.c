@@ -73,7 +73,7 @@ static int init(struct ra_hwdec *hw)
     struct priv_owner *p = hw->priv;
     HRESULT hr;
 
-    if (!ra_is_gl(hw->ra))
+    if (!ra_is_gl(hw->ra_ctx->ra))
         return -1;
     if (!angle_load())
         return -1;
@@ -183,6 +183,12 @@ static int init(struct ra_hwdec *hw)
         .av_device_ref = d3d9_wrap_device_ref((IDirect3DDevice9 *)p->device9ex),
         .hw_imgfmt = IMGFMT_DXVA2,
     };
+
+    if (!p->hwctx.av_device_ref) {
+        MP_VERBOSE(hw, "Failed to create hwdevice_ctx\n");
+        goto fail;
+    }
+
     hwdec_devices_add(hw->devs, &p->hwctx);
 
     return 0;
@@ -337,7 +343,7 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     // of the above StretchRect. Timeout of 8ms is required to reliably
     // render 4k on Intel Haswell, Ivybridge and Cherry Trail Atom.
     const int max_retries = 8;
-    const int64_t wait_us = 1000;
+    const int64_t wait_ns = MP_TIME_MS_TO_NS(1);
     int retries = 0;
     while (true) {
         hr = IDirect3DQuery9_GetData(p->query9, NULL, 0, D3DGETDATA_FLUSH);
@@ -347,10 +353,10 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
         } else if (hr == S_FALSE) {
             if (++retries > max_retries) {
                 MP_VERBOSE(mapper, "Failed to flush frame after %lld ms\n",
-                           (long long)(wait_us * max_retries) / 1000);
+                           (long long)MP_TIME_MS_TO_NS(wait_ns * max_retries));
                 break;
             }
-            mp_sleep_us(wait_us);
+            mp_sleep_ns(wait_ns);
         } else {
             break;
         }
@@ -367,6 +373,7 @@ const struct ra_hwdec_driver ra_hwdec_dxva2egl = {
     .name = "dxva2-egl",
     .priv_size = sizeof(struct priv_owner),
     .imgfmts = {IMGFMT_DXVA2, 0},
+    .device_type = AV_HWDEVICE_TYPE_DXVA2,
     .init = init,
     .uninit = uninit,
     .mapper = &(const struct ra_hwdec_mapper_driver){

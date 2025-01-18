@@ -16,13 +16,9 @@
  */
 
 #include <string.h>
-#include <strings.h>
 #include <sys/types.h>
-#include <dirent.h>
 #include <math.h>
-#include <pthread.h>
 #include <assert.h>
-#include <unistd.h>
 
 #include "config.h"
 
@@ -40,6 +36,8 @@
 #include "core.h"
 #include "client.h"
 #include "libmpv/client.h"
+#include "libmpv/render.h"
+#include "libmpv/stream_cb.h"
 
 extern const struct mp_scripting mp_scripting_lua;
 extern const struct mp_scripting mp_scripting_cplugin;
@@ -83,26 +81,24 @@ static char *script_name_from_filename(void *talloc_ctx, const char *fname)
 
 static void run_script(struct mp_script_args *arg)
 {
-    char name[90];
-    snprintf(name, sizeof(name), "%s (%s)", arg->backend->name,
-             mpv_client_name(arg->client));
-    mpthread_set_name(name);
+    char *name = talloc_asprintf(NULL, "%s/%s", arg->backend->name,
+                                 mpv_client_name(arg->client));
+    mp_thread_set_name(name);
+    talloc_free(name);
 
     if (arg->backend->load(arg) < 0)
-        MP_ERR(arg, "Could not load %s %s\n", arg->backend->name, arg->filename);
+        MP_ERR(arg, "Could not load %s script %s\n", arg->backend->name, arg->filename);
 
     mpv_destroy(arg->client);
     talloc_free(arg);
 }
 
-static void *script_thread(void *p)
+static MP_THREAD_VOID script_thread(void *p)
 {
-    pthread_detach(pthread_self());
-
     struct mp_script_args *arg = p;
     run_script(arg);
 
-    return NULL;
+    MP_THREAD_RETURN();
 }
 
 static int64_t mp_load_script(struct MPContext *mpctx, const char *fname)
@@ -186,17 +182,18 @@ static int64_t mp_load_script(struct MPContext *mpctx, const char *fname)
     arg->log = mp_client_get_log(arg->client);
     int64_t id = mpv_client_id(arg->client);
 
-    MP_DBG(arg, "Loading %s %s...\n", backend->name, arg->filename);
+    MP_DBG(arg, "Loading %s script %s...\n", backend->name, arg->filename);
 
     if (backend->no_thread) {
         run_script(arg);
     } else {
-        pthread_t thread;
-        if (pthread_create(&thread, NULL, script_thread, arg)) {
+        mp_thread thread;
+        if (mp_thread_create(&thread, script_thread, arg)) {
             mpv_destroy(arg->client);
             talloc_free(arg);
             return -1;
         }
+        mp_thread_detach(thread);
     }
 
     return id;
@@ -265,6 +262,7 @@ void mp_load_builtin_scripts(struct MPContext *mpctx)
     load_builtin_script(mpctx, 3, mpctx->opts->lua_load_console, "@console.lua");
     load_builtin_script(mpctx, 4, mpctx->opts->lua_load_auto_profiles,
                         "@auto_profiles.lua");
+    load_builtin_script(mpctx, 5, mpctx->opts->lua_load_select, "@select.lua");
 }
 
 bool mp_load_scripts(struct MPContext *mpctx)
@@ -295,10 +293,82 @@ bool mp_load_scripts(struct MPContext *mpctx)
 
 #if HAVE_CPLUGINS
 
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 
 #define MPV_DLOPEN_FN "mpv_open_cplugin"
 typedef int (*mpv_open_cplugin)(mpv_handle *handle);
+
+static void init_sym_table(struct mp_script_args *args, void *lib) {
+#define INIT_SYM(name)                                                         \
+    {                                                                          \
+        void **sym = (void **)dlsym(lib, "pfn_" #name);                        \
+        if (sym) {                                                             \
+            if (*sym && *sym != &name)                                         \
+                MP_ERR(args, "Overriding already set function " #name "\n");   \
+            *sym = &name;                                                      \
+        }                                                                      \
+    }
+
+    INIT_SYM(mpv_client_api_version);
+    INIT_SYM(mpv_error_string);
+    INIT_SYM(mpv_free);
+    INIT_SYM(mpv_client_name);
+    INIT_SYM(mpv_client_id);
+    INIT_SYM(mpv_create);
+    INIT_SYM(mpv_initialize);
+    INIT_SYM(mpv_destroy);
+    INIT_SYM(mpv_terminate_destroy);
+    INIT_SYM(mpv_create_client);
+    INIT_SYM(mpv_create_weak_client);
+    INIT_SYM(mpv_load_config_file);
+    INIT_SYM(mpv_get_time_us);
+    INIT_SYM(mpv_free_node_contents);
+    INIT_SYM(mpv_set_option);
+    INIT_SYM(mpv_set_option_string);
+    INIT_SYM(mpv_command);
+    INIT_SYM(mpv_command_node);
+    INIT_SYM(mpv_command_ret);
+    INIT_SYM(mpv_command_string);
+    INIT_SYM(mpv_command_async);
+    INIT_SYM(mpv_command_node_async);
+    INIT_SYM(mpv_abort_async_command);
+    INIT_SYM(mpv_set_property);
+    INIT_SYM(mpv_set_property_string);
+    INIT_SYM(mpv_del_property);
+    INIT_SYM(mpv_set_property_async);
+    INIT_SYM(mpv_get_property);
+    INIT_SYM(mpv_get_property_string);
+    INIT_SYM(mpv_get_property_osd_string);
+    INIT_SYM(mpv_get_property_async);
+    INIT_SYM(mpv_observe_property);
+    INIT_SYM(mpv_unobserve_property);
+    INIT_SYM(mpv_event_name);
+    INIT_SYM(mpv_event_to_node);
+    INIT_SYM(mpv_request_event);
+    INIT_SYM(mpv_request_log_messages);
+    INIT_SYM(mpv_wait_event);
+    INIT_SYM(mpv_wakeup);
+    INIT_SYM(mpv_set_wakeup_callback);
+    INIT_SYM(mpv_wait_async_requests);
+    INIT_SYM(mpv_hook_add);
+    INIT_SYM(mpv_hook_continue);
+    INIT_SYM(mpv_get_wakeup_pipe);
+
+    INIT_SYM(mpv_render_context_create);
+    INIT_SYM(mpv_render_context_set_parameter);
+    INIT_SYM(mpv_render_context_get_info);
+    INIT_SYM(mpv_render_context_set_update_callback);
+    INIT_SYM(mpv_render_context_update);
+    INIT_SYM(mpv_render_context_render);
+    INIT_SYM(mpv_render_context_report_swap);
+    INIT_SYM(mpv_render_context_free);
+
+    INIT_SYM(mpv_stream_cb_add_ro);
+
+#undef INIT_SYM
+}
 
 static int load_cplugin(struct mp_script_args *args)
 {
@@ -310,6 +380,9 @@ static int load_cplugin(struct mp_script_args *args)
     mpv_open_cplugin sym = (mpv_open_cplugin)dlsym(lib, MPV_DLOPEN_FN);
     if (!sym)
         goto error;
+
+    init_sym_table(args, lib);
+
     return sym(args->client) ? -1 : 0;
 error: ;
     char *err = dlerror();
@@ -319,8 +392,12 @@ error: ;
 }
 
 const struct mp_scripting mp_scripting_cplugin = {
-    .name = "SO plugin",
+    .name = "cplugin",
+    #ifdef _WIN32
+    .file_ext = "dll",
+    #else
     .file_ext = "so",
+    #endif
     .load = load_cplugin,
 };
 
@@ -356,27 +433,18 @@ static int load_run(struct mp_script_args *args)
         .detach = true,
     };
     struct mp_subprocess_result res;
-    mp_subprocess2(&opts, &res);
+    mp_subprocess(args->log, &opts, &res);
 
     // Closing these will (probably) make the client exit, if it really died.
-    // They _should_ be CLOEXEC, but are not, because
-    // posix_spawn_file_actions_adddup2() may not clear the CLOEXEC flag
-    // properly if by coincidence fd==src_fd.
     close(fds[0]);
     if (fds[1] >= 0)
         close(fds[1]);
 
-    if (res.error < 0) {
-        MP_ERR(args, "Starting '%s' failed: %s\n", args->filename,
-               mp_subprocess_err_str(res.error));
-        return -1;
-    }
-
-    return 0;
+    return res.error;
 }
 
 const struct mp_scripting mp_scripting_run = {
-    .name = "spawned IPC process",
+    .name = "ipc",
     .file_ext = "run",
     .no_thread = true,
     .load = load_run,

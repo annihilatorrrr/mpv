@@ -51,14 +51,6 @@ void mp_msg(struct mp_log *log, int lev, const char *format, ...)
     PRINTF_ATTRIBUTE(3, 4);
 int mp_msg_find_level(const char *s);
 int mp_msg_level(struct mp_log *log);
-void mp_write_console_ansi(void);
-
-// Windows additionally requires timer related code so it will actually
-// import the real versions of these functions and use them. On other
-// platforms, these can just be stubs for simplicity.
-#ifndef WIN32_TESTS
-void mp_add_timeout(void);
-void mp_rel_time_to_timespec(void);
-void mp_time_us(void);
-void mp_time_us_to_timespec(void);
-#endif
+void mp_msg_set_max_level(struct mp_log *log, int lev);
+typedef struct AVDictionary AVDictionary;
+void mp_set_avdict(AVDictionary **dict, char **kv);

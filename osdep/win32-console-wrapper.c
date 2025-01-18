@@ -19,6 +19,9 @@
 #include <stdio.h>
 #include <windows.h>
 
+// copied from osdep/io.h since this file is standalone
+#define MP_PATH_MAX (32000)
+
 int wmain(int argc, wchar_t **argv, wchar_t **envp);
 
 static void cr_perror(const wchar_t *prefix)
@@ -32,32 +35,37 @@ static void cr_perror(const wchar_t *prefix)
                    MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
                    (LPWSTR)&error, 0, NULL);
 
-    fwprintf(stderr, L"%s: %s", prefix, error);
+    fwprintf(stderr, L"%ls: %ls", prefix, error);
     LocalFree(error);
 }
 
 static int cr_runproc(wchar_t *name, wchar_t *cmdline)
 {
-    STARTUPINFOW si;
-    STARTUPINFOW our_si;
-    PROCESS_INFORMATION pi;
     DWORD retval = 1;
 
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    si.dwFlags |= STARTF_USESTDHANDLES;
-
     // Copy the list of inherited CRT file descriptors to the new process
-    our_si.cb = sizeof(our_si);
+    STARTUPINFOW our_si = {sizeof(our_si)};
     GetStartupInfoW(&our_si);
-    si.lpReserved2 = our_si.lpReserved2;
-    si.cbReserved2 = our_si.cbReserved2;
 
-    ZeroMemory(&pi, sizeof(pi));
-
+    // Don't redirect std streams if they are attached to a console. Let mpv
+    // attach to the console directly in this case. In theory, it should work
+    // out of the box because "console-like" handles should be managed by Windows
+    // internally, which works for INPUT and OUTPUT, but in certain cases,
+    // not for ERROR.
+    DWORD mode;
+    HANDLE hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE hStdError  = GetStdHandle(STD_ERROR_HANDLE);
+    STARTUPINFOW si = {
+        .cb          = sizeof(si),
+        .lpReserved2 = our_si.lpReserved2,
+        .cbReserved2 = our_si.cbReserved2,
+        .hStdInput   = GetConsoleMode(hStdInput, &mode)  ? NULL : hStdInput,
+        .hStdOutput  = GetConsoleMode(hStdOutput, &mode) ? NULL : hStdOutput,
+        .hStdError   = GetConsoleMode(hStdError, &mode)  ? NULL : hStdError,
+    };
+    si.dwFlags = (si.hStdInput || si.hStdOutput || si.hStdError) ? STARTF_USESTDHANDLES : 0;
+    PROCESS_INFORMATION pi = {0};
     if (!CreateProcessW(name, cmdline, NULL, NULL, TRUE, 0,
                         NULL, NULL, &si, &pi)) {
 
@@ -75,10 +83,11 @@ static int cr_runproc(wchar_t *name, wchar_t *cmdline)
 int wmain(int argc, wchar_t **argv, wchar_t **envp)
 {
     wchar_t *cmd;
-    wchar_t exe[MAX_PATH];
+    wchar_t *exe;
 
     cmd = GetCommandLineW();
-    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    exe = LocalAlloc(LPTR, MP_PATH_MAX * sizeof(wchar_t));
+    GetModuleFileNameW(NULL, exe, MP_PATH_MAX);
     wcscpy(wcsrchr(exe, '.') + 1, L"exe");
 
     // Set an environment variable so the child process can tell whether it

@@ -100,23 +100,29 @@ static void check_in_format_change(struct mp_user_filter *u,
         struct mp_image *img = frame.data;
 
         if (!mp_image_params_equal(&img->params, &u->last_in_vformat)) {
-            MP_VERBOSE(p, "[%s] %s\n", u->name,
-                       mp_image_params_to_str(&img->params));
-            u->last_in_vformat = img->params;
-
             if (u == p->input) {
                 p->public.input_params = img->params;
             } else if (u == p->output) {
                 p->public.output_params = img->params;
             }
 
-            // Unfortunately there's no good place to update these.
-            // But a common case is enabling HW decoding, which
-            // might init some support of them in the VO, and update
-            // the VO's format list.
-            update_output_caps(p);
+            if (!mp_image_params_static_equal(&img->params, &u->last_in_vformat)) {
+                MP_VERBOSE(p, "[%s] %s\n", u->name,
+                           mp_image_params_to_str(&img->params));
 
-            p->public.reconfig_happened = true;
+                // Unfortunately there's no good place to update these.
+                // But a common case is enabling HW decoding, which
+                // might init some support of them in the VO, and update
+                // the VO's format list.
+                //
+                // But as this is only relevant to the "convert" filter, don't
+                // do this for the other filters as it is wasted work.
+                if (strcmp(u->name, "convert") == 0)
+                    update_output_caps(p);
+
+                p->public.reconfig_happened = true;
+            }
+            u->last_in_vformat = img->params;
         }
     }
 
@@ -139,7 +145,7 @@ static void check_in_format_change(struct mp_user_filter *u,
     }
 }
 
-static void process_user(struct mp_filter *f)
+static void user_wrapper_process(struct mp_filter *f)
 {
     struct mp_user_filter *u = f->priv;
     struct chain *p = u->p;
@@ -206,7 +212,7 @@ static void process_user(struct mp_filter *f)
     }
 }
 
-static void reset_user(struct mp_filter *f)
+static void user_wrapper_reset(struct mp_filter *f)
 {
     struct mp_user_filter *u = f->priv;
 
@@ -214,7 +220,7 @@ static void reset_user(struct mp_filter *f)
     u->last_in_pts = u->last_out_pts = MP_NOPTS_VALUE;
 }
 
-static void destroy_user(struct mp_filter *f)
+static void user_wrapper_destroy(struct mp_filter *f)
 {
     struct mp_user_filter *u = f->priv;
 
@@ -227,9 +233,9 @@ static void destroy_user(struct mp_filter *f)
 static const struct mp_filter_info user_wrapper_filter = {
     .name = "user_filter_wrapper",
     .priv_size = sizeof(struct mp_user_filter),
-    .process = process_user,
-    .reset = reset_user,
-    .destroy = destroy_user,
+    .process = user_wrapper_process,
+    .reset = user_wrapper_reset,
+    .destroy = user_wrapper_destroy,
 };
 
 static struct mp_user_filter *create_wrapper_filter(struct chain *p)
@@ -276,7 +282,7 @@ static void relink_filter_list(struct chain *p)
     }
 }
 
-static void process(struct mp_filter *f)
+static void output_chain_process(struct mp_filter *f)
 {
     struct chain *p = f->priv;
 
@@ -305,7 +311,7 @@ static void process(struct mp_filter *f)
     }
 }
 
-static void reset(struct mp_filter *f)
+static void output_chain_reset(struct mp_filter *f)
 {
     struct chain *p = f->priv;
 
@@ -335,17 +341,17 @@ void mp_output_chain_reset_harder(struct mp_output_chain *c)
     }
 }
 
-static void destroy(struct mp_filter *f)
+static void output_chain_destroy(struct mp_filter *f)
 {
-    reset(f);
+    output_chain_reset(f);
 }
 
 static const struct mp_filter_info output_chain_filter = {
     .name = "output_chain",
     .priv_size = sizeof(struct chain),
-    .process = process,
-    .reset = reset,
-    .destroy = destroy,
+    .process = output_chain_process,
+    .reset = output_chain_reset,
+    .destroy = output_chain_destroy,
 };
 
 static double get_display_fps(struct mp_stream_info *i)
@@ -355,6 +361,13 @@ static double get_display_fps(struct mp_stream_info *i)
     if (p->vo)
         vo_control(p->vo, VOCTRL_GET_DISPLAY_FPS, &res);
     return res;
+}
+
+static void get_display_res(struct mp_stream_info *i, int *res)
+{
+    struct chain *p = i->priv;
+    if (p->vo)
+        vo_control(p->vo, VOCTRL_GET_DISPLAY_RES, res);
 }
 
 void mp_output_chain_set_vo(struct mp_output_chain *c, struct vo *vo)
@@ -507,6 +520,17 @@ double mp_output_get_measured_total_delay(struct mp_output_chain *c)
     return delay;
 }
 
+bool mp_output_chain_deinterlace_active(struct mp_output_chain *c)
+{
+    struct chain *p = c->f->priv;
+    for (int n = 0; n < p->num_all_filters; n++) {
+        struct mp_user_filter *u = p->all_filters[n];
+        if (strcmp(u->name, "userdeint") == 0)
+            return mp_deint_active(u->f);
+    }
+    return false;
+}
+
 bool mp_output_chain_update_filters(struct mp_output_chain *c,
                                     struct m_obj_settings *list)
 {
@@ -605,7 +629,7 @@ bool mp_output_chain_update_filters(struct mp_output_chain *c,
 
 error:
     for (int n = 0; n < num_add; n++)
-        talloc_free(add[n]);
+        talloc_free(add[n]->wrapper);
     talloc_free(add);
     talloc_free(used);
     return false;
@@ -617,6 +641,7 @@ static void create_video_things(struct chain *p)
 
     p->stream_info.priv = p;
     p->stream_info.get_display_fps = get_display_fps;
+    p->stream_info.get_display_res = get_display_res;
 
     p->f->stream_info = &p->stream_info;
 
@@ -711,7 +736,7 @@ struct mp_output_chain *mp_output_chain_create(struct mp_filter *parent,
 
     relink_filter_list(p);
 
-    reset(f);
+    output_chain_reset(f);
 
     return c;
 }

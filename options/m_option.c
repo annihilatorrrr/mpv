@@ -28,7 +28,6 @@
 #include <stdarg.h>
 #include <limits.h>
 #include <inttypes.h>
-#include <unistd.h>
 #include <assert.h>
 
 #include <libavutil/common.h>
@@ -1023,12 +1022,12 @@ static char *print_double(const m_option_t *opt, const void *val)
     return talloc_asprintf(NULL, "%f", f);
 }
 
-static char *print_double_f3(const m_option_t *opt, const void *val)
+static char *pretty_print_double(const m_option_t *opt, const void *val)
 {
     double f = VAL(val);
     if (isnan(f))
         return print_double(opt, val);
-    return talloc_asprintf(NULL, "%.3f", f);
+    return mp_format_double(NULL, f, 4, false, false, !(opt->flags & M_OPT_FIXED_LEN_PRINT));
 }
 
 static void add_double(const m_option_t *opt, void *val, double add, bool wrap)
@@ -1100,7 +1099,33 @@ const m_option_type_t m_option_type_double = {
     .size  = sizeof(double),
     .parse = parse_double,
     .print = print_double,
-    .pretty_print = print_double_f3,
+    .pretty_print = pretty_print_double,
+    .copy  = copy_opt,
+    .add = add_double,
+    .multiply = multiply_double,
+    .set   = double_set,
+    .get   = double_get,
+    .equal = double_equal,
+};
+
+static int parse_double_aspect(struct mp_log *log, const m_option_t *opt,
+                               struct bstr name, struct bstr param, void *dst)
+{
+    if (bstr_equals0(param, "no")) {
+        if (dst)
+            VAL(dst) = 0.0;
+        return 1;
+    }
+    return parse_double(log, opt, name, param, dst);
+}
+
+const m_option_type_t m_option_type_aspect = {
+    .name  = "Aspect",
+    .size  = sizeof(double),
+    .flags = M_OPT_TYPE_CHOICE | M_OPT_TYPE_USES_RANGE,
+    .parse = parse_double_aspect,
+    .print = print_double,
+    .pretty_print = pretty_print_double,
     .copy  = copy_opt,
     .add = add_double,
     .multiply = multiply_double,
@@ -1128,10 +1153,10 @@ static char *print_float(const m_option_t *opt, const void *val)
     return print_double(opt, &tmp);
 }
 
-static char *print_float_f3(const m_option_t *opt, const void *val)
+static char *pretty_print_float(const m_option_t *opt, const void *val)
 {
     double tmp = VAL(val);
-    return print_double_f3(opt, &tmp);
+    return pretty_print_double(opt, &tmp);
 }
 
 static void add_float(const m_option_t *opt, void *val, double add, bool wrap)
@@ -1176,33 +1201,7 @@ const m_option_type_t m_option_type_float = {
     .size  = sizeof(float),
     .parse = parse_float,
     .print = print_float,
-    .pretty_print = print_float_f3,
-    .copy  = copy_opt,
-    .add = add_float,
-    .multiply = multiply_float,
-    .set   = float_set,
-    .get   = float_get,
-    .equal = float_equal,
-};
-
-static int parse_float_aspect(struct mp_log *log, const m_option_t *opt,
-                              struct bstr name, struct bstr param, void *dst)
-{
-    if (bstr_equals0(param, "no")) {
-        if (dst)
-            VAL(dst) = 0.0f;
-        return 1;
-    }
-    return parse_float(log, opt, name, param, dst);
-}
-
-const m_option_type_t m_option_type_aspect = {
-    .name  = "Aspect",
-    .size  = sizeof(float),
-    .flags = M_OPT_TYPE_CHOICE | M_OPT_TYPE_USES_RANGE,
-    .parse = parse_float_aspect,
-    .print = print_float,
-    .pretty_print = print_float_f3,
+    .pretty_print = pretty_print_float,
     .copy  = copy_opt,
     .add = add_float,
     .multiply = multiply_float,
@@ -1234,10 +1233,8 @@ static char *print_str(const m_option_t *opt, const void *val)
 
 static void copy_str(const m_option_t *opt, void *dst, const void *src)
 {
-    if (dst && src) {
-        talloc_free(VAL(dst));
-        VAL(dst) = talloc_strdup(NULL, VAL(src));
-    }
+    if (dst && src)
+        talloc_replace(NULL, VAL(dst), VAL(src));
 }
 
 static int str_set(const m_option_t *opt, void *dst, struct mpv_node *src)
@@ -1292,11 +1289,10 @@ const m_option_type_t m_option_type_string = {
 #define OP_NONE 0
 #define OP_ADD 1
 #define OP_PRE 2
-#define OP_DEL 3
-#define OP_CLR 4
-#define OP_TOGGLE 5
-#define OP_APPEND 6
-#define OP_REMOVE 7
+#define OP_CLR 3
+#define OP_TOGGLE 4
+#define OP_APPEND 5
+#define OP_REMOVE 6
 
 static void free_str_list(void *dst)
 {
@@ -1321,6 +1317,15 @@ static int str_list_add(char **add, int n, void *dst, int pre)
     for (ln = 0; lst && lst[ln]; ln++)
         /**/;
 
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    if (ln >= 100) {
+        while (n--)
+            talloc_free(add[n]);
+        talloc_free(add);
+        return 0;
+    }
+#endif
+
     lst = talloc_realloc(NULL, lst, char *, n + ln + 1);
 
     if (pre) {
@@ -1334,55 +1339,6 @@ static int str_list_add(char **add, int n, void *dst, int pre)
     talloc_free(add);
 
     VAL(dst) = lst;
-
-    return 1;
-}
-
-static int str_list_del(struct mp_log *log, char **del, int n, void *dst)
-{
-    char **lst, *ep;
-    int i, ln, s;
-    long idx;
-
-    lst = VAL(dst);
-
-    for (ln = 0; lst && lst[ln]; ln++)
-        /**/;
-    s = ln;
-
-    for (i = 0; del[i] != NULL; i++) {
-        idx = strtol(del[i], &ep, 0);
-        if (*ep) {
-            mp_err(log, "Invalid index: %s\n", del[i]);
-            talloc_free(del[i]);
-            continue;
-        }
-        talloc_free(del[i]);
-        if (idx < 0 || idx >= ln) {
-            mp_err(log, "Index %ld is out of range.\n", idx);
-            continue;
-        } else if (!lst[idx])
-            continue;
-        talloc_free(lst[idx]);
-        lst[idx] = NULL;
-        s--;
-    }
-    talloc_free(del);
-
-    if (s == 0) {
-        talloc_free(lst);
-        VAL(dst) = NULL;
-        return 1;
-    }
-
-    // Don't bother shrinking the list allocation
-    for (i = 0, n = 0; i < ln; i++) {
-        if (!lst[i])
-            continue;
-        lst[n] = lst[i];
-        n++;
-    }
-    lst[s] = NULL;
 
     return 1;
 }
@@ -1433,11 +1389,6 @@ static int parse_str_list_impl(struct mp_log *log, const m_option_t *opt,
         multi = false;
     } else if (bstr_endswith0(name, "-pre")) {
         op = OP_PRE;
-    } else if (bstr_endswith0(name, "-del")) {
-        op = OP_DEL;
-        mp_warn(log, "Option %.*s: -del is deprecated! "
-                "Use -remove (removes by content instead of by index).\n",
-                BSTR_P(name));
     } else if (bstr_endswith0(name, "-clr")) {
         op = OP_CLR;
     } else if (bstr_endswith0(name, "-set")) {
@@ -1451,14 +1402,20 @@ static int parse_str_list_impl(struct mp_log *log, const m_option_t *opt,
     if (op == OP_TOGGLE || op == OP_REMOVE) {
         if (dst) {
             char **list = VAL(dst);
-            int index = find_list_bstr(list, param);
-            if (index >= 0) {
-                char *old = list[index];
-                for (int n = index; list[n]; n++)
-                    list[n] = list[n + 1];
-                talloc_free(old);
+            bool found = false;
+            int index = 0;
+            do {
+                index = find_list_bstr(list, param);
+                if (index >= 0) {
+                    found = true;
+                    char *old = list[index];
+                    for (int n = index; list[n]; n++)
+                        list[n] = list[n + 1];
+                    talloc_free(old);
+                }
+            } while (index >= 0);
+            if (found)
                 return 1;
-            }
         }
         if (op == OP_REMOVE)
             return 1; // ignore if not found
@@ -1499,6 +1456,10 @@ static int parse_str_list_impl(struct mp_log *log, const m_option_t *opt,
     n = 0;
 
     while (1) {
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+        if (n >= 100)
+            break;
+#endif
         struct bstr el = get_nextsep(&str, separator, 1);
         res[n] = bstrdup0(NULL, el);
         n++;
@@ -1519,8 +1480,6 @@ static int parse_str_list_impl(struct mp_log *log, const m_option_t *opt,
         return str_list_add(res, n, dst, 0);
     case OP_PRE:
         return str_list_add(res, n, dst, 1);
-    case OP_DEL:
-        return str_list_del(log, res, n, dst);
     }
 
     if (VAL(dst))
@@ -1563,6 +1522,7 @@ static char *print_str_list(const m_option_t *opt, const void *src)
 {
     char **lst = NULL;
     char *ret = NULL;
+    const char sep = opt->priv ? *(char *)opt->priv : OPTION_LIST_SEPARATOR;
 
     if (!(src && VAL(src)))
         return talloc_strdup(NULL, "");
@@ -1570,7 +1530,7 @@ static char *print_str_list(const m_option_t *opt, const void *src)
 
     for (int i = 0; lst[i]; i++) {
         if (ret)
-            ret = talloc_strdup_append_buffer(ret, ",");
+            ret = talloc_strndup_append_buffer(ret, &sep, 1);
         ret = talloc_strdup_append_buffer(ret, lst[i]);
     }
     return ret;
@@ -1650,7 +1610,6 @@ const m_option_type_t m_option_type_string_list = {
         {"add"},
         {"append"},
         {"clr",         M_OPT_TYPE_OPTIONAL_PARAM},
-        {"del"},
         {"pre"},
         {"set"},
         {"toggle"},
@@ -2258,7 +2217,7 @@ static char *print_geometry(const m_option_t *opt, const void *val)
 // scrw,scrh: width and height of the current screen
 // The input parameters should be set to a centered window (default fallbacks).
 void m_geometry_apply(int *xpos, int *ypos, int *widw, int *widh,
-                      int scrw, int scrh, struct m_geometry *gm)
+                      int scrw, int scrh, bool center, struct m_geometry *gm)
 {
     if (gm->wh_valid) {
         int prew = *widw, preh = *widh;
@@ -2273,10 +2232,10 @@ void m_geometry_apply(int *xpos, int *ypos, int *widw, int *widh,
         } else if (!(gm->w > 0) && gm->h > 0) {
             *widw = *widh * asp;
         }
-        // Center window after resize. If valid x:y values are passed to
-        // geometry, then those values will be overridden.
-        *xpos += prew / 2 - *widw / 2;
-        *ypos += preh / 2 - *widh / 2;
+        if (center) {
+            *xpos += prew / 2 - *widw / 2;
+            *ypos += preh / 2 - *widh / 2;
+        }
     }
 
     if (gm->xy_valid) {
@@ -2381,6 +2340,64 @@ const m_option_type_t m_option_type_size_box = {
     .equal = geometry_equal,
 };
 
+void m_rect_apply(struct mp_rect *rc, int w, int h, struct m_geometry *gm)
+{
+    *rc = (struct mp_rect){0, 0, w, h};
+    if (!w || !h)
+        return;
+    m_geometry_apply(&rc->x0, &rc->y0, &rc->x1, &rc->y1, w, h, true, gm);
+    if (!gm->xy_valid && gm->wh_valid && rc->x1 == 0 && rc->y1 == 0)
+        return;
+    if (!gm->wh_valid || rc->x1 == 0 || rc->x1 == INT_MIN)
+        rc->x1 = w - rc->x0;
+    if (!gm->wh_valid || rc->y1 == 0 || rc->y1 == INT_MIN)
+        rc->y1 = h - rc->y0;
+    if (gm->wh_valid && (gm->w || gm->h))
+        rc->x1 += rc->x0;
+    if (gm->wh_valid && (gm->w || gm->h))
+        rc->y1 += rc->y0;
+}
+
+static int parse_rect(struct mp_log *log, const m_option_t *opt,
+                      struct bstr name, struct bstr param, void *dst)
+{
+    bool is_help = bstr_equals0(param, "help");
+    if (is_help)
+        goto exit;
+
+    struct m_geometry gm;
+    if (!parse_geometry_str(&gm, param))
+        goto exit;
+
+    bool invalid = gm.x_sign || gm.y_sign || gm.ws;
+    invalid |= gm.wh_valid && (gm.w < 0 || gm.h < 0);
+    invalid |= gm.wh_valid && !gm.xy_valid && gm.w <= 0 && gm.h <= 0;
+
+    if (invalid)
+        goto exit;
+
+    if (dst)
+        *((struct m_geometry *)dst) = gm;
+
+    return 1;
+
+exit:
+    if (!is_help) {
+        mp_err(log, "Option %.*s: invalid rect: '%.*s'\n",
+               BSTR_P(name), BSTR_P(param));
+    }
+    mp_info(log, "Valid format: W[%%][xH[%%]][+x+y]\n");
+    return is_help ? M_OPT_EXIT : M_OPT_INVALID;
+}
+
+const m_option_type_t m_option_type_rect = {
+    .name  = "Video rect",
+    .size  = sizeof(struct m_geometry),
+    .parse = parse_rect,
+    .print = print_geometry,
+    .copy  = copy_opt,
+    .equal = geometry_equal,
+};
 
 #include "video/img_format.h"
 
@@ -2569,6 +2586,7 @@ static int parse_channels(struct mp_log *log, const m_option_t *opt,
     }
 
     if (dst) {
+        opt->type->free(dst);
         *(struct m_channels *)dst = res;
     } else {
         talloc_free(res.chmaps);
@@ -2648,21 +2666,36 @@ const m_option_type_t m_option_type_channels = {
 
 static int parse_timestring(struct bstr str, double *time, char endchar)
 {
-    int a, b, len;
-    double d;
+    int len;
+    unsigned h, m;
+    double s;
     *time = 0; /* ensure initialization for error cases */
-    if (bstr_sscanf(str, "%d:%d:%lf%n", &a, &b, &d, &len) >= 3)
-        *time = 3600 * a + 60 * b + d;
-    else if (bstr_sscanf(str, "%d:%lf%n", &a, &d, &len) >= 2)
-        *time = 60 * a + d;
-    else if (bstr_sscanf(str, "%lf%n", &d, &len) >= 1)
-        *time = d;
-    else
+    bool neg = bstr_eatstart0(&str, "-");
+    if (!neg)
+        bstr_eatstart0(&str, "+");
+    bool sci = bstr_find0(str, "e-") >= 0 || bstr_find0(str, "e+") >= 0;
+    /* non-scientific notation timestamps shouldn't contain anymore +/- after this point */
+    if (!sci && (bstrchr(str, '-') >= 0 || bstrchr(str, '+') >= 0))
+        return 0;
+    if (bstr_sscanf(str, "%u:%u:%lf%n", &h, &m, &s, &len) >= 3) {
+        if (m >= 60 || s >= 60)
+            return 0; /* minutes or seconds are out of range */
+        *time = 3600.0 * h + 60 * m + s;
+    } else if (bstr_sscanf(str, "%u:%lf%n", &m, &s, &len) >= 2) {
+        if (s >= 60)
+            return 0; /* seconds are out of range */
+        *time = 60.0 * m + s;
+    } else if (bstr_sscanf(str, "%lf%n", &s, &len) >= 1) {
+        *time = s;
+    } else {
         return 0;  /* unsupported time format */
+    }
     if (len < str.len && str.start[len] != endchar)
         return 0;  /* invalid extra characters at the end */
     if (!isfinite(*time))
         return 0;
+    if (neg)
+        *time = -*time;
     return len;
 }
 
@@ -2803,8 +2836,7 @@ static char *print_rel_time(const m_option_t *opt, const void *val)
     case REL_TIME_ABSOLUTE:
         return talloc_asprintf(NULL, "%g", t->pos);
     case REL_TIME_RELATIVE:
-        return talloc_asprintf(NULL, "%s%g",
-            (t->pos >= 0) ? "+" : "-", fabs(t->pos));
+        return talloc_asprintf(NULL, "%+g", t->pos);
     case REL_TIME_CHAPTER:
         return talloc_asprintf(NULL, "#%g", t->pos);
     case REL_TIME_PERCENT:
@@ -2900,10 +2932,18 @@ static void obj_settings_list_del_at(m_obj_settings_t **p_obj_list, int idx)
 // Insert such that *p_obj_list[idx] is set to item.
 // If idx < 0, set idx = count + idx + 1 (i.e. -1 inserts it as last element).
 // Memory referenced by *item is not copied.
-static void obj_settings_list_insert_at(m_obj_settings_t **p_obj_list, int idx,
+static bool obj_settings_list_insert_at(struct mp_log *log,
+                                        m_obj_settings_t **p_obj_list, int idx,
                                         m_obj_settings_t *item)
 {
     int num = obj_settings_list_num_items(*p_obj_list);
+    // Limit list entries to 100. obj_settings_list is not designed to hold more
+    // items, and it quickly starts taking ages to add all items.
+    if (num > 100) {
+        mp_warn(log, "Object settings list capacity exceeded: "
+                     "a maximum of 100 elements is allowed.");
+        return false;
+    }
     if (idx < 0)
         idx = num + idx + 1;
     assert(idx >= 0 && idx <= num);
@@ -2913,6 +2953,7 @@ static void obj_settings_list_insert_at(m_obj_settings_t **p_obj_list, int idx,
             (num - idx) * sizeof(m_obj_settings_t));
     (*p_obj_list)[idx] = *item;
     (*p_obj_list)[num + 1] = (m_obj_settings_t){0};
+    return true;
 }
 
 static int obj_settings_list_find_by_label(m_obj_settings_t *obj_list,
@@ -3148,7 +3189,7 @@ print_help: ;
     } else if (list->print_unknown_entry_help) {
         list->print_unknown_entry_help(log, mp_tprintf(80, "%.*s", BSTR_P(name)));
     } else {
-        mp_warn(log, "Option %.*s: item %.*s doesn't exist.\n",
+        mp_warn(log, "Option %.*s: item '%.*s' isn't supported.\n",
                BSTR_P(opt_name), BSTR_P(name));
     }
     r = M_OPT_EXIT;
@@ -3203,7 +3244,7 @@ static int parse_obj_settings(struct mp_log *log, struct bstr opt, int op,
     int idx = bstrspn(*pstr, NAMECH);
     str = bstr_splice(*pstr, 0, idx);
     if (!str.len) {
-        mp_err(log, "Option %.*s: filter name expected.\n", BSTR_P(opt));
+        mp_err(log, "Option %.*s: item name expected.\n", BSTR_P(opt));
         return M_OPT_INVALID;
     }
     *pstr = bstr_cut(*pstr, idx);
@@ -3220,7 +3261,7 @@ static int parse_obj_settings(struct mp_log *log, struct bstr opt, int op,
         char name[80];
         snprintf(name, sizeof(name), "%.*s", BSTR_P(str));
         if (list->check_unknown_entry && !list->check_unknown_entry(name)) {
-            mp_err(log, "Option %.*s: %.*s doesn't exist.\n",
+            mp_err(log, "Option %.*s: '%.*s' isn't supported.\n",
                    BSTR_P(opt), BSTR_P(str));
             return M_OPT_INVALID;
         }
@@ -3249,15 +3290,15 @@ done: ;
         .enabled = enabled,
         .attribs = plist,
     };
-    obj_settings_list_insert_at(_ret, -1, &item);
+    if (!obj_settings_list_insert_at(log, _ret, -1, &item))
+        obj_setting_free(&item);
     return 1;
 }
 
-// Parse a single entry for -vf-del (return 0 if not applicable)
+// Parse a single entry for -vf-remove (return 0 if not applicable)
 // mark_del is bounded by the number of items in dst
 static int parse_obj_settings_del(struct mp_log *log, struct bstr opt_name,
-                                  struct bstr *param, int op,
-                                  void *dst, bool *mark_del)
+                                  struct bstr *param, void *dst, bool *mark_del)
 {
     bstr s = *param;
     if (bstr_eatstart0(&s, "@")) {
@@ -3269,7 +3310,8 @@ static int parse_obj_settings_del(struct mp_log *log, struct bstr opt_name,
         if (bstr_startswith0(s, ":"))
             return 0;
         if (dst) {
-            int label_index = obj_settings_list_find_by_label(VAL(dst), label);
+            int label_index = 0;
+            label_index = obj_settings_list_find_by_label(VAL(dst), label);
             if (label_index >= 0) {
                 mark_del[label_index] = true;
             } else {
@@ -3280,30 +3322,7 @@ static int parse_obj_settings_del(struct mp_log *log, struct bstr opt_name,
         *param = s;
         return 1;
     }
-
-    if (op == OP_REMOVE)
-        return 0;
-
-    bstr rest;
-    long long id = bstrtoll(s, &rest, 0);
-    if (rest.len == s.len)
-        return 0;
-
-    if (dst) {
-        int num = obj_settings_list_num_items(VAL(dst));
-        if (id < 0)
-            id = num + id;
-
-        if (id >= 0 && id < num) {
-            mark_del[id] = true;
-        } else {
-            mp_warn(log, "Option %.*s: Index %lld is out of range.\n",
-                    BSTR_P(opt_name), id);
-        }
-    }
-
-    *param = rest;
-    return 1;
+    return 0;
 }
 
 static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
@@ -3314,6 +3333,7 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
     bool *mark_del = NULL;
     int num_items = obj_settings_list_num_items(dst ? VAL(dst) : 0);
     const struct m_obj_list *ol = opt->priv;
+    int ret = 1;
 
     assert(opt->priv);
 
@@ -3325,11 +3345,6 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
         op = OP_NONE;
     } else if (bstr_endswith0(name, "-pre")) {
         op = OP_PRE;
-    } else if (bstr_endswith0(name, "-del")) {
-        op = OP_DEL;
-        mp_warn(log, "Option %.*s: -del is deprecated! "
-                "Use -remove (removes by content instead of by index).\n",
-                BSTR_P(name));
     } else if (bstr_endswith0(name, "-remove")) {
         op = OP_REMOVE;
     } else if (bstr_endswith0(name, "-clr")) {
@@ -3342,25 +3357,22 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
                 "  %s-set\n"
                 " Overwrite the old list with the given list\n\n"
                 "  %s-append\n"
-                " Append the given filter to the current list\n\n"
+                " Append the given item to the current list\n\n"
                 "  %s-add\n"
                 " Append the given list to the current list\n\n"
                 "  %s-pre\n"
                 " Prepend the given list to the current list\n\n"
                 "  %s-remove\n"
-                " Remove the given filter from the current list\n\n"
-                "  %s-del x,y,...\n"
-                " Remove the given elements. Take the list element index (starting from 0).\n"
-                " Negative index can be used (i.e. -1 is the last element).\n"
-                " Filter names work as well.\n\n"
+                " Remove the given item from the current list\n\n"
                 "  %s-toggle\n"
-                " Add the filter to the list, or remove it if it's already added.\n\n"
+                " Add the item to the list, or remove it if it's already added.\n\n"
                 "  %s-clr\n"
                 " Clear the current list.\n\n",
                 opt->name, opt->name, opt->name, opt->name, opt->name,
-                opt->name, opt->name, opt->name, opt->name);
+                opt->name, opt->name, opt->name);
 
-        return M_OPT_EXIT;
+        ret = M_OPT_EXIT;
+        goto done;
     }
 
     if (!bstrcmp0(param, "help")) {
@@ -3381,46 +3393,61 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
             mp_info(log, "Get help on individual entries via: --%s=entry=help\n",
                     opt->name);
         }
-        return M_OPT_EXIT;
+        ret = M_OPT_EXIT;
+        goto done;
     }
 
     if (op == OP_CLR) {
         if (param.len) {
             mp_err(log, "Option %.*s: -clr does not take an argument.\n",
                    BSTR_P(name));
-            return M_OPT_INVALID;
+            ret = M_OPT_INVALID;
+            goto done;
         }
         if (dst)
             free_obj_settings_list(dst);
-        return 0;
-    } else if (op == OP_DEL || op == OP_REMOVE) {
+        ret = 0;
+        goto done;
+    } else if (op == OP_REMOVE) {
         mark_del = talloc_zero_array(NULL, bool, num_items + 1);
     }
 
-    if (op != OP_NONE && param.len == 0)
-        return M_OPT_MISSING_PARAM;
+    if (op != OP_NONE && param.len == 0) {
+        ret = M_OPT_MISSING_PARAM;
+        goto done;
+    }
 
     while (param.len > 0) {
         int r = 0;
-        if (op == OP_DEL || op == OP_REMOVE)
-            r = parse_obj_settings_del(log, name, &param, op, dst, mark_del);
+        if (op == OP_REMOVE)
+            r = parse_obj_settings_del(log, name, &param, dst, mark_del);
         if (r == 0) {
             r = parse_obj_settings(log, name, op, &param, ol, dst ? &res : NULL);
         }
-        if (r < 0)
-            return r;
+        if (r < 0) {
+            free_obj_settings_list(&res);
+            ret = r;
+            goto done;
+        }
         if (param.len > 0) {
             const char sep[2] = {OPTION_LIST_SEPARATOR, 0};
-            if (!bstr_eatstart0(&param, sep))
-                return M_OPT_INVALID;
+            if (!bstr_eatstart0(&param, sep)) {
+                free_obj_settings_list(&res);
+                ret = M_OPT_INVALID;
+                goto done;
+            }
             if (param.len == 0) {
-                if (!ol->allow_trailer)
-                    return M_OPT_INVALID;
+                if (!ol->allow_trailer) {
+                    free_obj_settings_list(&res);
+                    ret = M_OPT_INVALID;
+                    goto done;
+                }
                 if (dst) {
                     m_obj_settings_t item = {
                         .name = talloc_strdup(NULL, ""),
                     };
-                    obj_settings_list_insert_at(&res, -1, &item);
+                    if (!obj_settings_list_insert_at(log, &res, -1, &item))
+                        obj_setting_free(&item);
                 }
             }
         }
@@ -3428,9 +3455,11 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
 
     if (op != OP_NONE && res && res[0].name && res[1].name) {
         if (op == OP_APPEND) {
-            mp_err(log, "Option %.*s: -append takes only 1 filter (no ',').\n",
+            mp_err(log, "Option %.*s: -append takes only 1 item (no ',').\n",
                    BSTR_P(name));
-            return M_OPT_INVALID;
+            free_obj_settings_list(&res);
+            ret = M_OPT_INVALID;
+            goto done;
         }
         mp_warn(log, "Passing more than 1 argument to %.*s is deprecated!\n",
                 BSTR_P(name));
@@ -3443,7 +3472,8 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
             for (int n = 0; res && res[n].name; n++) {
                 int label = obj_settings_list_find_by_label0(list, res[n].label);
                 if (label < 0) {
-                    obj_settings_list_insert_at(&list, prepend_counter, &res[n]);
+                    if (!obj_settings_list_insert_at(log, &list, prepend_counter, &res[n]))
+                        obj_setting_free(&res[n]);
                     prepend_counter++;
                 } else {
                     // Prefer replacement semantics, instead of actually
@@ -3457,7 +3487,8 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
             for (int n = 0; res && res[n].name; n++) {
                 int label = obj_settings_list_find_by_label0(list, res[n].label);
                 if (label < 0) {
-                    obj_settings_list_insert_at(&list, -1, &res[n]);
+                    if (!obj_settings_list_insert_at(log, &list, -1, &res[n]))
+                        obj_setting_free(&res[n]);
                 } else {
                     // Prefer replacement semantics, instead of actually
                     // appending.
@@ -3482,7 +3513,8 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
                 } else {
                     int found = obj_settings_find_by_content(list, &res[n]);
                     if (found < 0) {
-                        obj_settings_list_insert_at(&list, -1, &res[n]);
+                        if (!obj_settings_list_insert_at(log, &list, -1, &res[n]))
+                            obj_setting_free(&res[n]);
                     } else {
                         obj_settings_list_del_at(&list, found);
                         obj_setting_free(&res[n]);
@@ -3490,19 +3522,15 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
                 }
             }
             talloc_free(res);
-        } else if (op == OP_DEL || op == OP_REMOVE) {
+        } else if (op == OP_REMOVE) {
             for (int n = num_items - 1; n >= 0; n--) {
                 if (mark_del[n])
                     obj_settings_list_del_at(&list, n);
             }
             for (int n = 0; res && res[n].name; n++) {
                 int found = obj_settings_find_by_content(list, &res[n]);
-                if (found < 0) {
-                    if (op == OP_DEL)
-                        mp_warn(log, "Option %.*s: Item not found\n", BSTR_P(name));
-                } else {
+                if (found >= 0)
                     obj_settings_list_del_at(&list, found);
-                }
             }
             free_obj_settings_list(&res);
         } else {
@@ -3513,8 +3541,9 @@ static int parse_obj_settings_list(struct mp_log *log, const m_option_t *opt,
         VAL(dst) = list;
     }
 
+done:
     talloc_free(mark_del);
-    return 1;
+    return ret;
 }
 
 static void append_param(char **res, char *param)
@@ -3708,7 +3737,6 @@ const m_option_type_t m_option_type_obj_settings_list = {
         {"add"},
         {"append"},
         {"clr",     M_OPT_TYPE_OPTIONAL_PARAM},
-        {"del"},
         {"help",    M_OPT_TYPE_OPTIONAL_PARAM},
         {"pre"},
         {"set"},
@@ -3798,7 +3826,7 @@ static void dup_node(void *ta_parent, struct mpv_node *node)
 
 static void copy_node(const m_option_t *opt, void *dst, const void *src)
 {
-    assert(sizeof(struct mpv_node) <= sizeof(union m_option_value));
+    static_assert(sizeof(struct mpv_node) <= sizeof(union m_option_value), "");
 
     if (!(dst && src))
         return;
@@ -3863,6 +3891,34 @@ const m_option_type_t m_option_type_node = {
     .set   = node_set,
     .get   = node_get,
     .equal = node_equal,
+};
+
+static int parse_cycle_dir(struct mp_log *log, const struct m_option *opt,
+                           struct bstr name, struct bstr param, void *dst)
+{
+    double val;
+    if (bstrcmp0(param, "up") == 0) {
+        val = +1;
+    } else if (bstrcmp0(param, "down") == 0) {
+        val = -1;
+    } else {
+        return m_option_type_double.parse(log, opt, name, param, dst);
+    }
+    *(double *)dst = val;
+    return 1;
+}
+
+static char *print_cycle_dir(const m_option_t *opt, const void *val)
+{
+    return talloc_asprintf(NULL, "%f", *(double *)val);
+}
+
+const m_option_type_t m_option_type_cycle_dir = {
+    .name = "up|down",
+    .parse = parse_cycle_dir,
+    .print = print_cycle_dir,
+    .copy = copy_opt,
+    .size = sizeof(double),
 };
 
 // Special-cased by m_config.c.

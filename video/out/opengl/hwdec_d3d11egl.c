@@ -86,7 +86,7 @@ static int init(struct ra_hwdec *hw)
     struct priv_owner *p = hw->priv;
     HRESULT hr;
 
-    if (!ra_is_gl(hw->ra))
+    if (!ra_is_gl(hw->ra_ctx->ra))
         return -1;
     if (!angle_load())
         return -1;
@@ -98,7 +98,7 @@ static int init(struct ra_hwdec *hw)
     if (!eglGetCurrentContext())
         return -1;
 
-    GL *gl = ra_gl_get(hw->ra);
+    GL *gl = ra_gl_get(hw->ra_ctx->ra);
 
     const char *exts = eglQueryString(egl_display, EGL_EXTENSIONS);
     if (!gl_check_extension(exts, "EGL_ANGLE_d3d_share_handle_client_buffer") ||
@@ -185,6 +185,12 @@ static int init(struct ra_hwdec *hw)
         .supported_formats = subfmts,
         .hw_imgfmt = IMGFMT_D3D11,
     };
+
+    if (!p->hwctx.av_device_ref) {
+        MP_VERBOSE(hw, "Failed to create hwdevice_ctx\n");
+        return -1;
+    }
+
     hwdec_devices_add(hw->devs, &p->hwctx);
 
     return 0;
@@ -345,6 +351,7 @@ const struct ra_hwdec_driver ra_hwdec_d3d11egl = {
     .name = "d3d11-egl",
     .priv_size = sizeof(struct priv_owner),
     .imgfmts = {IMGFMT_D3D11, 0},
+    .device_type = AV_HWDEVICE_TYPE_D3D11VA,
     .init = init,
     .uninit = uninit,
     .mapper = &(const struct ra_hwdec_mapper_driver){

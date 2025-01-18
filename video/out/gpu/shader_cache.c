@@ -185,8 +185,6 @@ void gl_sc_enable_extension(struct gl_shader_cache *sc, char *name)
     MP_TARRAY_APPEND(sc, sc->exts, sc->num_exts, talloc_strdup(sc, name));
 }
 
-#define bstr_xappend0(sc, b, s) bstr_xappend(sc, b, bstr0(s))
-
 void gl_sc_add(struct gl_shader_cache *sc, const char *text)
 {
     bstr_xappend0(sc, &sc->text, text);
@@ -557,10 +555,16 @@ static void update_uniform(struct gl_shader_cache *sc, struct sc_entry *e,
     }
 }
 
-void gl_sc_set_cache_dir(struct gl_shader_cache *sc, const char *dir)
+void gl_sc_set_cache_dir(struct gl_shader_cache *sc, char *dir)
 {
     talloc_free(sc->cache_dir);
+    if (dir && dir[0]) {
+        dir = mp_get_user_path(NULL, sc->global, dir);
+    } else {
+        dir = mp_find_user_file(NULL, sc->global, "cache", "");
+    }
     sc->cache_dir = talloc_strdup(sc, dir);
+    talloc_free(dir);
 }
 
 static bool create_pass(struct gl_shader_cache *sc, struct sc_entry *entry)

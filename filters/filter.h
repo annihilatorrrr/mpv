@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <libavutil/hwcontext.h>
 
 #include "frame.h"
 
@@ -376,6 +377,7 @@ struct mp_filter_command {
     enum mp_filter_command_type type;
 
     // For MP_FILTER_COMMAND_TEXT
+    const char *target;
     const char *cmd;
     const char *arg;
 
@@ -398,6 +400,7 @@ struct mp_stream_info {
     void *priv; // for use by whoever implements the callbacks
 
     double (*get_display_fps)(struct mp_stream_info *i);
+    void   (*get_display_res)(struct mp_stream_info *i, int *res);
 
     struct mp_hwdec_devices *hwdec_devs;
     struct osd_state *osd;
@@ -408,7 +411,8 @@ struct mp_stream_info {
 // Search for a parent filter (including f) that has this set, and return it.
 struct mp_stream_info *mp_filter_find_stream_info(struct mp_filter *f);
 
-struct mp_hwdec_ctx *mp_filter_load_hwdec_device(struct mp_filter *f, int imgfmt);
+struct mp_hwdec_ctx *mp_filter_load_hwdec_device(struct mp_filter *f, int imgfmt,
+                                                 enum AVHWDeviceType device_type);
 
 // Perform filtering. This runs until the filter graph is blocked (due to
 // missing external input or unread output). It returns whether any outside

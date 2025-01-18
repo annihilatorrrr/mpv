@@ -34,16 +34,16 @@ extern const struct ra_hwdec_driver ra_hwdec_dxva2gldx;
 extern const struct ra_hwdec_driver ra_hwdec_d3d11va;
 extern const struct ra_hwdec_driver ra_hwdec_dxva2dxgi;
 extern const struct ra_hwdec_driver ra_hwdec_cuda;
-extern const struct ra_hwdec_driver ra_hwdec_rpi_overlay;
 extern const struct ra_hwdec_driver ra_hwdec_drmprime;
 extern const struct ra_hwdec_driver ra_hwdec_drmprime_overlay;
 extern const struct ra_hwdec_driver ra_hwdec_aimagereader;
+extern const struct ra_hwdec_driver ra_hwdec_vulkan;
 
 const struct ra_hwdec_driver *const ra_hwdec_drivers[] = {
-#if HAVE_VAAPI_EGL || HAVE_VAAPI_LIBPLACEBO
+#if HAVE_VAAPI
     &ra_hwdec_vaapi,
 #endif
-#if HAVE_VIDEOTOOLBOX_GL || HAVE_IOS_GL
+#if HAVE_VIDEOTOOLBOX_GL || HAVE_IOS_GL || HAVE_VIDEOTOOLBOX_PL
     &ra_hwdec_videotoolbox,
 #endif
 #if HAVE_D3D_HWACCEL
@@ -69,21 +69,22 @@ const struct ra_hwdec_driver *const ra_hwdec_drivers[] = {
 #if HAVE_VDPAU_GL_X11
     &ra_hwdec_vdpau,
 #endif
-#if HAVE_RPI_MMAL
-    &ra_hwdec_rpi_overlay,
-#endif
 #if HAVE_DRM
-    &ra_hwdec_drmprime_overlay,
     &ra_hwdec_drmprime,
+    &ra_hwdec_drmprime_overlay,
 #endif
 #if HAVE_ANDROID_MEDIA_NDK
     &ra_hwdec_aimagereader,
+#endif
+#if HAVE_VULKAN
+    &ra_hwdec_vulkan,
 #endif
 
     NULL
 };
 
-struct ra_hwdec *ra_hwdec_load_driver(struct ra *ra, struct mp_log *log,
+struct ra_hwdec *ra_hwdec_load_driver(struct ra_ctx *ra_ctx,
+                                      struct mp_log *log,
                                       struct mpv_global *global,
                                       struct mp_hwdec_devices *devs,
                                       const struct ra_hwdec_driver *drv,
@@ -94,7 +95,7 @@ struct ra_hwdec *ra_hwdec_load_driver(struct ra *ra, struct mp_log *log,
         .driver = drv,
         .log = mp_log_new(hwdec, log, drv->name),
         .global = global,
-        .ra = ra,
+        .ra_ctx = ra_ctx,
         .devs = devs,
         .probing = is_auto,
         .priv = talloc_zero_size(hwdec, drv->priv_size),
@@ -134,7 +135,7 @@ struct ra_hwdec_mapper *ra_hwdec_mapper_create(struct ra_hwdec *hwdec,
         .owner = hwdec,
         .driver = hwdec->driver->mapper,
         .log = hwdec->log,
-        .ra = hwdec->ra,
+        .ra = hwdec->ra_ctx->ra,
         .priv = talloc_zero_size(mapper, hwdec->driver->mapper->priv_size),
         .src_params = *params,
         .dst_params = *params,
@@ -232,7 +233,7 @@ static void load_add_hwdec(struct ra_hwdec_ctx *ctx, struct mp_hwdec_devices *de
     }
 
     struct ra_hwdec *hwdec =
-        ra_hwdec_load_driver(ctx->ra, ctx->log, ctx->global, devs, drv, is_auto);
+        ra_hwdec_load_driver(ctx->ra_ctx, ctx->log, ctx->global, devs, drv, is_auto);
     if (hwdec)
         MP_TARRAY_APPEND(NULL, ctx->hwdecs, ctx->num_hwdecs, hwdec);
 }
@@ -249,7 +250,7 @@ static void load_hwdecs_all(struct ra_hwdec_ctx *ctx, struct mp_hwdec_devices *d
 void ra_hwdec_ctx_init(struct ra_hwdec_ctx *ctx, struct mp_hwdec_devices *devs,
                        const char *type, bool load_all_by_default)
 {
-    assert(ctx->ra);
+    assert(ctx->ra_ctx);
 
     /*
      * By default, or if the option value is "auto", we will not pre-emptively
@@ -350,4 +351,14 @@ int ra_hwdec_driver_get_imgfmt_for_name(const char *name)
         }
     }
     return IMGFMT_NONE;
+}
+
+enum AVHWDeviceType ra_hwdec_driver_get_device_type_for_name(const char *name)
+{
+    for (int i = 0; ra_hwdec_drivers[i]; i++) {
+        if (!strcmp(ra_hwdec_drivers[i]->name, name)) {
+            return ra_hwdec_drivers[i]->device_type;
+        }
+    }
+    return AV_HWDEVICE_TYPE_NONE;
 }

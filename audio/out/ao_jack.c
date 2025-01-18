@@ -22,10 +22,10 @@
  * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "config.h"
 #include "common/msg.h"
@@ -33,7 +33,6 @@
 #include "ao.h"
 #include "internal.h"
 #include "audio/format.h"
-#include "osdep/atomic.h"
 #include "osdep/timer.h"
 #include "options/m_config.h"
 #include "options/m_option.h"
@@ -122,10 +121,10 @@ static int process(jack_nframes_t nframes, void *arg)
     jack_nframes_t jack_latency =
         atomic_load(&p->graph_latency_max) + atomic_load(&p->buffer_size);
 
-    int64_t end_time = mp_time_us();
-    end_time += (jack_latency + nframes) / (double)ao->samplerate * 1000000.0;
+    int64_t end_time = mp_time_ns();
+    end_time += MP_TIME_S_TO_NS((jack_latency + nframes) / (double)ao->samplerate);
 
-    ao_read_data(ao, buffers, nframes, end_time);
+    ao_read_data(ao, buffers, nframes, end_time, NULL, true, true);
 
     return 0;
 }
@@ -246,6 +245,8 @@ static int init(struct ao *ao)
     jack_set_process_callback(p->client, process, ao);
 
     ao->samplerate = jack_get_sample_rate(p->client);
+    // The actual device buffer can change, but this is enough for pre-buffer
+    ao->device_buffer = jack_get_buffer_size(p->client);
 
     jack_set_buffer_size_callback(p->client, buffer_size_cb, ao);
     jack_set_graph_order_callback(p->client, graph_order_cb, ao);
